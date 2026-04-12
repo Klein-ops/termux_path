@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # termux_path 公共函数库
-# POSIX sh 兼容
+#  Android sh 兼容
 
 # === 动态获取模块根目录 ===
 MODDIR=${0%/*}
@@ -294,11 +294,6 @@ sync_all() {
 # === 开机服务入口 ===
 run_service() {
     log "模块启动"
-    while [ "$(getprop sys.boot_completed)" != "1" ]; do
-        sleep 1
-    done
-    log "系统启动完成"
-
     sync_all > /dev/null
     log "模块完成"
 }
