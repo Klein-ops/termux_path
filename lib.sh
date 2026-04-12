@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # termux_path 公共函数库
-#  Android sh 兼容
+#  Android sh 完美兼容
 
 # === 动态获取模块根目录 ===
 MODDIR=${0%/*}
@@ -90,14 +90,14 @@ build_system_cmd_cache() {
     log "系统命令缓存已建立"
 }
 
-# === 检查是否是我们的 wrapper ===
+# === 检查是否是我们的 wrapper（仅软链接）===
 is_our_wrapper() {
     file="$1"
     if [ -L "$file" ]; then
         target=$(readlink "$file")
         [ "$target" = "$WRAPPER_MAIN_NAME" ] || [ "$target" = "./$WRAPPER_MAIN_NAME" ] && return 0
     fi
-    grep -q "# termux_path Wrapper" "$file" 2>/dev/null
+    return 1
 }
 
 # === 检查是否系统命令 ===
@@ -238,7 +238,6 @@ cleanup_invalid_wrappers() {
         is_our_wrapper "$wrapper" || continue
         cmd=$(basename "$wrapper")
 
-        # 如果命令在黑名单中，清理掉
         if is_blacklisted "$cmd"; then
             rm -f "$wrapper"
             log "清理黑名单 wrapper: $cmd"
@@ -246,7 +245,6 @@ cleanup_invalid_wrappers() {
             continue
         fi
 
-        # 如果命令在 Termux 中已失效，清理掉
         if ! is_termux_cmd_valid "$cmd"; then
             rm -f "$wrapper"
             log "清理失效 wrapper: $cmd"
