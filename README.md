@@ -1,104 +1,118 @@
 # Termux PATH Bridge
 
-将 Termux 环境中的可执行命令桥接到 Android 系统 PATH 的 Magisk 模块。
+将 Termux 命令无缝桥接到 Android 系统 PATH 的 Magisk 模块。
 
-在任意终端（adb shell、MT 管理器终端、Terminal Emulator 等）中直接调用你在 Termux 里用 pkg 安装的程序（如 python、ffmpeg、youtube-dl、vim 等），无需输入完整路径或先进入 Termux 环境。
-
-
-## ✨ 核心特性
-
-- 动态扫描与自动发现
-  每次启动或手动触发时，自动扫描 Termux 的 bin 目录，无需手动编写命令列表。
-
-- 软链接 + 统一主脚本架构
-  所有命令 wrapper 均以软链接形式指向同一个主脚本 wrapper_main.sh。版本更新时只需替换该脚本，所有链接自动生效，极大降低维护成本。
-
-- 智能冲突避免
-  自动跳过所有 Android 系统原生已有的命令（如 sh、ls、pm），并内置关键命令黑名单（su、mount、reboot 等），防止覆盖系统核心工具。
-
-- 用户自定义黑名单
-  支持通过模块根目录下的 blacklist 文件自定义需要跳过的命令，每行一个命令名。被列入黑名单的命令不会被创建 wrapper，已存在的 wrapper 也会在下次扫描时自动清理。
-
-- 零残留自动清理
-  当你在 Termux 中卸载某个程序后，下次扫描会自动清理其对应的失效 wrapper 软链接，保持系统 xbin 目录整洁。
-
-- 开机权限自动修复
-  在开机 late_start 阶段自动修复 Termux 私有数据目录的必要权限和 SELinux 上下文，确保命令可被普通用户执行，同时避免过度修改。
-
-- POSIX sh 完全兼容
-  脚本严格遵守 POSIX 标准，不依赖 Bash 扩展，在所有 Android 设备的 /system/bin/sh 下均可运行。
+安装后，你可以在任何终端（adb shell、MT 管理器、Terminal Emulator 等）中直接运行 Termux 安装的程序——python、ffmpeg、youtube-dl、vim、git……就像它们原本就是系统命令一样。
 
 
-## ⚙️ 技术实现与工作流程
+## ⚡ 为什么选择它
 
-本模块的核心工作由位于模块根目录的公共函数库脚本完成，该脚本负责以下三个主要阶段：
+- 开箱即用：重启手机自动完成扫描，无需任何配置
+- Android 10+ 全兼容：自动注入 SELinux 规则，普通应用（无 Root）也能调用 Termux 命令
+- 零冲突设计：自动跳过系统已有命令，永不覆盖原生功能
+- 实时同步：Termux 安装/卸载程序后，一键扫描即刻更新
+- 轻量安全：纯软链接架构，不复制文件，不修改系统分区
 
-### 第一阶段：环境初始化与缓存构建
 
-模块启动时首先执行以下步骤：
+## ✨ 功能全景
 
-1. 动态获取模块根目录
-   使用 ${0%/*} 语法获取脚本所在目录，确保在 service.sh 和手动执行两种模式下都能准确定位模块路径。
+| 功能 | 说明 |
+|------|------|
+| 动态扫描 | 自动发现 Termux 中所有可执行程序 |
+| 软链接架构 | 所有命令指向统一主脚本，更新仅需替换一个文件 |
+| SELinux 适配 | Android 10+ 自动写入策略规则，解除普通应用执行限制 |
+| 冲突避免 | 跳过系统命令、关键命令、用户黑名单三重保护 |
+| 自动清理 | Termux 卸载程序后，对应 wrapper 自动移除 |
+| 精细化权限修复 | 仅修改必要目录，不对 Termux 数据目录过度干预 |
+| 用户黑名单 | 自定义屏蔽不希望暴露的命令 |
+| POSIX 兼容 | 纯 POSIX sh 语法，所有设备通用 |
 
-2. 加载用户黑名单
-   读取模块根目录下的 blacklist 文件（如果存在），忽略空行和以 # 开头的注释行，将每行内容作为命令名存入黑名单缓存。
 
-3. 获取纯净系统 PATH
-   通过 env -i /system/bin/sh -c 'echo $PATH' 命令获取 Android 系统的原始、未受污染的 PATH 变量。这避免了当前 Shell 环境变量可能已被 Termux 或其他模块修改的问题。
+## 🏗️ 技术架构
 
-4. 构建系统命令缓存
-   遍历系统 PATH 下的所有目录（/system/bin、/vendor/bin、/product/bin、/system/xbin 等），将其中存在的所有文件名一次性读入内存缓存变量 SYSTEM_CMDS_CACHE。这个缓存用于后续阶段的高速冲突检测，避免每次检查都重新扫描文件系统。
+### 整体设计
 
-5. 精细化修复 Termux 目录权限
-   执行 restorecon -R 恢复 SELinux 上下文。随后仅对必要路径设置权限：
-   - /data/data/com.termux 自身设为 755
-   - /data/data/com.termux/files 设为 755
-   - /data/data/com.termux/files/usr 目录递归设为 755
-   - 临时目录 /data/data/com.termux/files/usr/tmp 设为 1777（粘滞位）
-   这种逐层设置的方式仅影响 Termux 执行程序所需的最小范围，避免递归修改整个应用数据目录可能带来的潜在问题。
+模块采用「软链接 + 统一主脚本」架构：
 
-### 第二阶段：扫描 Termux 并创建软链接
+/system/xbin/
+├── wrapper_main.sh      # 统一主脚本（所有调用的真正入口）
+├── python -> wrapper_main.sh
+├── ffmpeg -> wrapper_main.sh
+├── git -> wrapper_main.sh
+└── ...
 
-遍历 Termux 二进制目录 /data/data/com.termux/files/usr/bin 下的每一个文件：
+当用户执行 python 时：
+1. 系统通过 PATH 定位到 /system/xbin/python（软链接）
+2. 软链接指向 wrapper_main.sh
+3. 主脚本解析被调用的命令名（python），设置 Termux 环境变量
+4. 通过 exec 执行 Termux 中的真实二进制 /data/data/com.termux/files/usr/bin/python
 
-1. 过滤条件
-   - 只处理普通文件或软链接
-   - 必须具有可执行权限
+这种设计的优势：
+- 空间高效：N 个命令仅占用 N 个软链接（每个约几十字节）
+- 维护简单：更新主脚本版本，所有命令行为同步升级
+- 挂载友好：相对路径软链接，模块可被 Magisk 挂载到任意位置
 
-2. 四重检查
-   对每个命令依次执行以下检查，任一条件满足则跳过：
+### 工作流程
 
-   a) 系统命令冲突检查
-      通过 case " $SYSTEM_CMDS_CACHE " in *" $cmd "*) 语法检查命令名是否已存在于系统命令缓存中。若存在则跳过，避免覆盖系统原生命令。
+模块的核心逻辑封装在公共函数库中，按以下三个阶段顺序执行：
 
-   b) 关键命令检查
-      内置关键命令列表包含：su、mount、umount、reboot、shutdown、init、kernel、recovery、magisk、magiskpolicy、resetprop。这些命令即使存在于 Termux 中也不会被链接，以保障系统安全。
+#### 阶段一：环境初始化
 
-   c) 用户黑名单检查
-      检查命令是否存在于用户自定义黑名单中。若存在则跳过，给予用户完全的控制权。
+初始化顺序：
+1. 获取模块根目录 → 确保路径定位准确
+2. 加载用户黑名单 → 读取 /data/adb/modules/termux_path/blacklist
+3. 获取纯净系统 PATH → 通过 env -i 避免环境污染
+4. 构建系统命令缓存 → 遍历 PATH 目录，存入内存供快速查重
+5. SELinux 规则注入 → SDK ≥ 29 时写入 sepolicy.rule
+6. 精细化权限修复 → 仅对必要路径设置 755/1777
 
-   d) Termux 源命令有效性检查
-      确认 Termux 中的对应文件确实存在且可执行。
+SELinux 规则详情（Android 10+）：
+allow * app_data_file file execute_no_trans
+allow * privapp_data_file file execute_no_trans
 
-3. 创建软链接
-   通过检查后，在模块的 /system/xbin 目录下创建软链接，使用相对路径指向同目录的 wrapper_main.sh。相对路径设计确保了模块可以被安全地挂载到任意位置而不破坏链接有效性。
+这两条规则允许任意进程执行 Termux 私有数据目录下的文件，是普通应用能够调用 Termux 命令的关键。
 
-### 第三阶段：失效清理
+权限修复详情：
+chmod 755 /data/data/com.termux
+chmod 755 /data/data/com.termux/files
+chmod -R 755 /data/data/com.termux/files/usr
+chmod 1777 /data/data/com.termux/files/usr/tmp
 
-本阶段负责自动清理不再需要的 wrapper 软链接：
+逐层设置而非递归整个应用目录，避免干扰 Termux 自身权限体系。
 
-1. 遍历模块 xbin 目录下的所有条目
-2. 跳过主脚本 wrapper_main.sh
-3. 判断该条目是否为本模块创建的 wrapper（通过检查软链接目标是否为 wrapper_main.sh）
-4. 对每个 wrapper 执行两类清理检查：
-   a) 黑名单清理：如果命令已被加入用户黑名单，删除其 wrapper
-   b) 有效性清理：如果 Termux 中对应的源命令已不存在，删除其 wrapper
+#### 阶段二：命令扫描与链接创建
 
-这实现了“加入黑名单即清理”和“卸载即清理”的自动维护机制。
+遍历 /data/data/com.termux/files/usr/bin/* 下的每个可执行文件，执行四重检查：
 
-### 统一主脚本的工作原理 (wrapper_main.sh)
+检查一：系统命令冲突
+通过 case " $SYSTEM_CMDS_CACHE " in *" $cmd "*) 语法检查命令名是否已存在于系统命令缓存中。若存在则跳过，避免覆盖系统原生命令。
 
-所有软链接最终都指向 wrapper_main.sh，该脚本的代码如下：
+检查二：关键命令黑名单
+内置黑名单包含：su、mount、umount、reboot、shutdown、magisk、magiskpolicy、resetprop。这些命令即使存在于 Termux 中也不会被链接，以保障系统安全。
+
+检查三：用户黑名单
+检查命令是否存在于用户自定义黑名单中。若存在则跳过，给予用户完全的控制权。
+
+检查四：Termux 源有效性
+确认 Termux 中的对应文件确实存在且可执行。
+
+通过所有检查后，在模块的 /system/xbin 目录下创建软链接，使用相对路径指向同目录的 wrapper_main.sh。
+
+#### 阶段三：失效清理
+
+遍历模块 xbin 目录下的所有软链接，执行两类清理：
+
+清理一：黑名单清理
+如果命令已被加入用户黑名单，删除其 wrapper。
+
+清理二：有效性清理
+如果 Termux 中对应的源命令已不存在，删除其 wrapper。
+
+这实现了「加入黑名单即清理」和「卸载即清理」的自动维护机制。
+
+### 统一主脚本详解
+
+所有软链接最终都指向 wrapper_main.sh，其完整代码如下：
 
 #!/system/bin/sh
 # termux_path Wrapper v2.0
@@ -127,17 +141,26 @@ export PATH="$PREFIX/bin:$PATH"
 
 exec "$TARGET" "$@"
 
-工作流程说明：
-1. 通过 basename "$0" 获取用户调用的命令名（即软链接的名称）
-2. 拼接 Termux 中对应二进制文件的完整路径
-3. 验证目标文件存在且可执行
-4. 设置 Termux 运行时所需的环境变量：
-   - HOME：Termux 用户主目录
-   - TMPDIR：临时文件目录
-   - PREFIX：Termux 安装前缀
+执行流程逐行解析：
+
+1. CMD=$(basename "$0")
+   获取用户调用的命令名，即软链接的名称。例如用户执行 python，则 CMD=python。
+
+2. TARGET="$PREFIX/bin/$CMD"
+   拼接 Termux 中对应二进制文件的完整路径：/data/data/com.termux/files/usr/bin/python。
+
+3. 文件存在性与权限检查
+   验证目标文件存在且可执行，若失败则返回标准错误码（127=命令未找到，126=权限不足）。
+
+4. 环境变量设置
+   - HOME：Termux 用户主目录，部分程序依赖此变量定位配置文件
+   - TMPDIR：临时文件目录，使用 Termux 的 tmp 而非系统 /tmp
+   - PREFIX：Termux 安装前缀，部分程序需要此变量
    - LD_LIBRARY_PATH：动态链接库搜索路径，确保 Termux 程序能找到其依赖的 .so 文件
    - PATH：将 Termux bin 目录前置，确保脚本内部调用其他命令时优先使用 Termux 版本
-5. 使用 exec 执行目标程序并传递所有参数。exec 会替换当前 Shell 进程，避免产生多余的进程层级
+
+5. exec "$TARGET" "$@"
+   使用 exec 执行目标程序并传递所有参数。exec 会替换当前 Shell 进程而非创建子进程，确保信号传递正确且避免进程层级冗余。
 
 
 ## 📦 安装与要求
@@ -181,7 +204,7 @@ node script.js
 
 ### 用户自定义黑名单
 
-如果你不希望某些 Termux 命令被暴露到系统 PATH（例如可能与系统命令产生混淆，或你仅希望在 Termux 内部使用），可以通过黑名单文件进行控制。
+如果你不希望某些 Termux 命令被暴露到系统 PATH，可以通过黑名单文件进行控制。
 
 1. 在模块根目录下创建或编辑 blacklist 文件：
    /data/adb/modules/termux_path/blacklist
@@ -192,7 +215,7 @@ node script.js
    sed
    grep
 
-3. 保存文件后，触发一次手动扫描（见下方说明），被列入黑名单的命令对应的 wrapper 将被自动清理，且后续扫描不会再创建。
+3. 保存文件后，触发一次手动扫描，被列入黑名单的命令对应的 wrapper 将被自动清理，且后续扫描不会再创建。
 
 ### 安装新命令后（手动触发扫描）
 
@@ -246,13 +269,17 @@ su
 
 ## 📝 注意事项
 
-1. 权限修改说明
-   本模块在开机时会执行精细化的权限修复：仅针对 Termux 的 /data/data/com.termux、/data/data/com.termux/files 以及 /data/data/com.termux/files/usr 目录设置 755 权限，并将临时目录设为 1777。这一过程不递归修改整个应用数据目录，从而在保障外部调用可用性的同时，最大程度减少对 Termux 自身文件权限的干扰。
+1. SELinux 策略说明
+   在 Android 10 及以上系统中，本模块会自动生成 sepolicy.rule 文件，允许普通应用执行 Termux 数据目录下的二进制文件。该规则由 Magisk 在启动时加载，无需用户操作。
 
-2. 日志文件
+2. 权限修改说明
+   本模块在开机时会执行精细化的权限修复：仅针对 Termux 的必要目录设置权限，不递归修改整个应用数据目录，从而在保障外部调用可用性的同时，最大程度减少对 Termux 自身文件权限的干扰。
+
+3. 日志文件
    所有操作（扫描、创建、清理）都会写入日志文件 /data/local/tmp/termux_path.log。遇到问题时，请优先查看此文件获取详细错误信息。日志格式示例：
 
    04-11 10:23:45 - ========== 开始同步 ==========
+   04-11 10:23:45 - SELinux 规则已写入 (SDK 33)
    04-11 10:23:45 - 系统命令缓存已建立
    04-11 10:23:46 - 创建 wrapper 链接: python
    04-11 10:23:46 - 主脚本已生成/更新到 v2.0
@@ -261,11 +288,8 @@ su
    04-11 10:23:47 - 同步完成 - 总计:452 新增:3 跳过:55 清理:2
    04-11 10:23:47 - ========== 同步结束 ==========
 
-3. 普通应用调用说明
-   普通应用（无 Root 权限）能否调用 Termux 命令取决于 SELinux 策略和 Termux 文件的权限设置。如果遇到普通应用无法调用的情况，可尝试在开发者选项中为 Termux 开启“可调试”选项，但这并非必需步骤，且效果因设备 ROM 而异。
-
 4. 与系统命令的关系
-   本模块不会覆盖任何系统已有命令。如果希望优先使用 Termux 版本的某个命令（例如 Termux 中的 awk 比系统自带的版本更新），可以手动删除对应的软链接，重新创建同名的独立脚本文件，自行控制 PATH 顺序，或在 Shell 配置文件（如 .bashrc）中调整 PATH 环境变量的顺序。
+   本模块不会覆盖任何系统已有命令。如果希望优先使用 Termux 版本的某个命令（例如 Termux 中的 awk 比系统自带的版本更新），可以手动删除对应的软链接，重新创建同名的独立脚本文件，自行控制 PATH 顺序，或在 Shell 配置文件中调整 PATH 环境变量的顺序。
 
 
 ## 🔧 故障排查
@@ -275,14 +299,14 @@ su
 可能原因及解决方法：
 
 1. 命令尚未被扫描
-   - 解决方法：手动执行一次扫描（参考上文“使用方法”部分）
+   - 解决方法：手动执行一次扫描
 
 2. Termux 中未安装该命令
    - 检查方法：在 Termux 中执行 pkg list-installed | grep 命令名
    - 解决方法：在 Termux 中使用 pkg install 安装所需包
 
 3. 模块未正确加载
-   - 检查方法：在 Magisk Manager 中确认模块状态为“已启用”
+   - 检查方法：在 Magisk Manager 中确认模块状态为「已启用」
    - 检查方法：执行 ls -la /system/xbin/ | grep wrapper_main.sh 查看模块文件是否存在
    - 解决方法：尝试禁用后重新启用模块，或重新安装模块后重启
 
@@ -301,7 +325,11 @@ su
    - 检查方法：执行 ls -lZ /data/data/com.termux/files/usr/bin/命令名
    - 解决方法：重启手机，模块会在开机时执行 restorecon 修复
 
-3. 手动修复
+3. SELinux 规则未生效（Android 10+）
+   - 检查方法：查看模块目录下是否存在 sepolicy.rule 文件
+   - 解决方法：重启手机以重新加载 Magisk 规则
+
+4. 手动修复
    - 在 Root 终端执行：
      chmod 755 /data/data/com.termux/files/usr/bin/*
      restorecon -R /data/data/com.termux
@@ -321,17 +349,10 @@ su
 
 可能原因：
 
-1. 该命令与系统命令同名
-   - 这是预期行为，模块会主动跳过以防止冲突
-
-2. 该命令在关键命令列表中
-   - 这是安全设计，防止覆盖 su、mount 等关键系统工具
-
-3. 该命令在用户黑名单中
-   - 检查 blacklist 文件，如确需暴露则移除对应行
-
-4. 该命令在 Termux 中不可执行
-   - 检查方法：在 Termux 中执行 ls -la /data/data/com.termux/files/usr/bin/命令名
+1. 该命令与系统命令同名 → 预期行为，模块主动跳过
+2. 该命令在关键命令列表中 → 安全设计，防止覆盖关键系统工具
+3. 该命令在用户黑名单中 → 检查 blacklist 文件
+4. 该命令在 Termux 中不可执行 → 在 Termux 中执行 ls -la 确认权限
 
 ### 问题：查看详细日志
 
@@ -362,9 +383,6 @@ tail -f /data/local/tmp/termux_path.log
 4. 打包为 zip
    zip -r termux_path_vX.X.X.zip ./* -x ".git/*" -x "*.md" -x ".gitignore"
 
-5. 签名（可选）
-   使用 Magisk 管理器安装时无需签名
-
 
 ## 📄 许可证
 
@@ -372,11 +390,11 @@ MIT License
 
 版权所有 (c) 2026 Klein-ops
 
-特此免费授予任何获得本软件及相关文档文件（下称“软件”）副本的人不受限制地处置本软件的权利，包括但不限于使用、复制、修改、合并、发布、分发、再许可和/或销售本软件副本的权利，以及允许获得本软件的人如此做的权利，但须符合以下条件：
+特此免费授予任何获得本软件及相关文档文件副本的人不受限制地处置本软件的权利，包括但不限于使用、复制、修改、合并、发布、分发、再许可和/或销售本软件副本的权利，以及允许获得本软件的人如此做的权利，但须符合以下条件：
 
 上述版权声明和本许可声明应包含在本软件的所有副本或实质部分中。
 
-本软件按“原样”提供，不作任何明示或默示的保证，包括但不限于对适销性、特定用途的适用性和非侵权性的保证。在任何情况下，作者或版权持有人均不对因本软件或本软件的使用或其他交易而引起的、与之相关的任何索赔、损害赔偿或其他责任承担责任，无论是合同诉讼、侵权行为还是其他。
+本软件按「原样」提供，不作任何明示或默示的保证。
 
 完整许可证文本请查看仓库中的 LICENSE 文件。
 
