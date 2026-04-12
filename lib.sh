@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # termux_path 公共函数库
-#  Android sh 完美兼容
+# POSIX sh 兼容
 
 # === 动态获取模块根目录 ===
 MODDIR=${0%/*}
@@ -23,7 +23,7 @@ SYSTEM_CMDS_CACHE=""
 # 黑名单缓存
 BLACKLIST=""
 
-# === 初始化环境 ===
+# === 初始化环境（精细化权限设置）===
 init_env() {
     mkdir -p "$MODULE_BIN_DIR"
     chmod 755 "$MODDIR" "$MODDIR/system" "$MODULE_BIN_DIR" 2>/dev/null
@@ -31,10 +31,15 @@ init_env() {
 
     if [ -d "/data/data/com.termux" ]; then
         restorecon -R /data/data/com.termux 2>/dev/null
-        chmod -R 755 /data/data/com.termux 2>/dev/null
+        
+        chmod 755 /data/data/com.termux 2>/dev/null
+        chmod 755 /data/data/com.termux/files 2>/dev/null
+        chmod -R 755 /data/data/com.termux/files/usr 2>/dev/null
+        
         mkdir -p /data/data/com.termux/files/usr/tmp
-        chmod 1777 /data/data/com.termux/files/usr/tmp
-        log "Termux 权限已修复"
+        chmod 1777 /data/data/com.termux/files/usr/tmp 2>/dev/null
+        
+        log "Termux 权限已精细修复"
     fi
 }
 
