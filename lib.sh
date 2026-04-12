@@ -11,8 +11,9 @@ TERMUX_BIN_DIR="/data/data/com.termux/files/usr/bin"
 MODULE_BIN_DIR="$MODDIR/system/xbin"
 LOG_FILE="/data/local/tmp/termux_path.log"
 WRAPPER_VERSION="2.0"
-CRITICAL_CMDS="su mount umount reboot shutdown init kernel recovery magisk magiskpolicy resetprop"
+CRITICAL_CMDS="su mount umount reboot shutdown magisk magiskpolicy resetprop"
 BLACKLIST_FILE="$MODDIR/blacklist"
+SEPOLICY_FILE="$MODDIR/sepolicy.rule"
 
 # 主脚本文件名
 WRAPPER_MAIN_NAME="wrapper_main.sh"
@@ -23,12 +24,26 @@ SYSTEM_CMDS_CACHE=""
 # 黑名单缓存
 BLACKLIST=""
 
-# === 初始化环境（精细化权限设置）===
+# === 初始化环境（包含 SELinux 规则，仅 Android 10+）===
 init_env() {
     mkdir -p "$MODULE_BIN_DIR"
     chmod 755 "$MODDIR" "$MODDIR/system" "$MODULE_BIN_DIR" 2>/dev/null
     chown -R root:root "$MODDIR" 2>/dev/null
 
+    # 仅在 Android 10 (SDK 29) 及以上写入 SELinux 规则
+    sdk_version=$(getprop ro.build.version.sdk)
+    if [ -n "$sdk_version" ] && [ "$sdk_version" -ge 29 ]; then
+        if [ ! -f "$SEPOLICY_FILE" ]; then
+            cat > "$SEPOLICY_FILE" << EOF
+allow * app_data_file file execute_no_trans
+allow * privapp_data_file file execute_no_trans
+EOF
+            chmod 644 "$SEPOLICY_FILE"
+            log "SELinux 规则已写入 (SDK $sdk_version)"
+        fi
+    fi
+
+    # 精细化 Termux 权限修复
     if [ -d "/data/data/com.termux" ]; then
         restorecon -R /data/data/com.termux 2>/dev/null
         
