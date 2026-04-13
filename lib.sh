@@ -9,28 +9,27 @@ MODDIR=${0%/*}
 # === 常量 ===
 TERMUX_BIN_DIR="/data/data/com.termux/files/usr/bin"
 MODULE_BIN_DIR="$MODDIR/system/xbin"
+MODULE_BIN_DIR_OVERRIDE="$MODDIR/system/bin"
 LOG_FILE="/data/local/tmp/termux_path.log"
-WRAPPER_VERSION="2.0"
+WRAPPER_VERSION="3.0"
 CRITICAL_CMDS="su mount umount reboot shutdown magisk magiskpolicy resetprop"
 BLACKLIST_FILE="$MODDIR/blacklist"
+WHITELIST_FILE="$MODDIR/whitelist"
 SEPOLICY_FILE="$MODDIR/sepolicy.rule"
 
-# 主脚本文件名
 WRAPPER_MAIN_NAME="wrapper_main.sh"
 WRAPPER_MAIN_SRC="$MODULE_BIN_DIR/$WRAPPER_MAIN_NAME"
 
-# 系统命令缓存
 SYSTEM_CMDS_CACHE=""
-# 黑名单缓存
 BLACKLIST=""
+WHITELIST=""
 
-# === 初始化环境（包含 SELinux 规则，仅 Android 10+）===
+# === 初始化环境 ===
 init_env() {
-    mkdir -p "$MODULE_BIN_DIR"
-    chmod 755 "$MODDIR" "$MODDIR/system" "$MODULE_BIN_DIR" 2>/dev/null
+    mkdir -p "$MODULE_BIN_DIR" "$MODULE_BIN_DIR_OVERRIDE"
+    chmod 755 "$MODDIR" "$MODDIR/system" "$MODULE_BIN_DIR" "$MODULE_BIN_DIR_OVERRIDE" 2>/dev/null
     chown -R root:root "$MODDIR" 2>/dev/null
 
-    # 仅在 Android 10 (SDK 29) 及以上写入 SELinux 规则
     sdk_version=$(getprop ro.build.version.sdk)
     if [ -n "$sdk_version" ] && [ "$sdk_version" -ge 29 ]; then
         if [ ! -f "$SEPOLICY_FILE" ]; then
@@ -43,17 +42,13 @@ EOF
         fi
     fi
 
-    # 精细化 Termux 权限修复
     if [ -d "/data/data/com.termux" ]; then
         restorecon -R /data/data/com.termux 2>/dev/null
-        
         chmod 755 /data/data/com.termux 2>/dev/null
         chmod 755 /data/data/com.termux/files 2>/dev/null
         chmod -R 755 /data/data/com.termux/files/usr 2>/dev/null
-        
         mkdir -p /data/data/com.termux/files/usr/tmp
         chmod 1777 /data/data/com.termux/files/usr/tmp 2>/dev/null
-        
         log "Termux 权限已精细修复"
     fi
 }
@@ -81,21 +76,40 @@ load_blacklist() {
         while IFS= read -r line || [ -n "$line" ]; do
             [ -z "$line" ] && continue
             echo "$line" | grep -q "^#" && continue
-            BLACKLIST="$BLACKLIST $line"
+            BLACKLIST="${BLACKLIST}/$line/"
         done < "$BLACKLIST_FILE"
     fi
 }
 
-# === 检查是否在黑名单中 ===
 is_blacklisted() {
     cmd="$1"
-    case " $BLACKLIST " in
-        *" $cmd "*) return 0 ;;
+    case "$BLACKLIST" in
+        *"/$cmd/"*) return 0 ;;
         *) return 1 ;;
     esac
 }
 
-# === 一次性扫描系统所有命令缓存 ===
+# === 加载白名单 ===
+load_whitelist() {
+    WHITELIST=""
+    if [ -f "$WHITELIST_FILE" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            [ -z "$line" ] && continue
+            echo "$line" | grep -q "^#" && continue
+            WHITELIST="${WHITELIST}/$line/"
+        done < "$WHITELIST_FILE"
+    fi
+}
+
+is_whitelisted() {
+    cmd="$1"
+    case "$WHITELIST" in
+        *"/$cmd/"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# === 系统命令缓存 ===
 build_system_cmd_cache() {
     SYSTEM_CMDS_CACHE=""
     sys_path=$(get_system_path)
@@ -103,33 +117,22 @@ build_system_cmd_cache() {
     for dir in $dirs; do
         if [ -d "$dir" ]; then
             for cmd in $(ls "$dir" 2>/dev/null); do
-                SYSTEM_CMDS_CACHE="$SYSTEM_CMDS_CACHE $cmd"
+                SYSTEM_CMDS_CACHE="${SYSTEM_CMDS_CACHE}/$cmd/"
             done
         fi
     done
     log "系统命令缓存已建立"
 }
 
-# === 检查是否是我们的 wrapper（仅软链接）===
-is_our_wrapper() {
-    file="$1"
-    if [ -L "$file" ]; then
-        target=$(readlink "$file")
-        [ "$target" = "$WRAPPER_MAIN_NAME" ] || [ "$target" = "./$WRAPPER_MAIN_NAME" ] && return 0
-    fi
-    return 1
-}
-
-# === 检查是否系统命令 ===
 is_system_cmd() {
     cmd="$1"
-    case " $SYSTEM_CMDS_CACHE " in
-        *" $cmd "*) return 0 ;;
+    case "$SYSTEM_CMDS_CACHE" in
+        *"/$cmd/"*) return 0 ;;
         *) return 1 ;;
     esac
 }
 
-# === 检查是否关键命令 ===
+# === 关键命令 ===
 is_critical_cmd() {
     cmd="$1"
     for c in $CRITICAL_CMDS; do
@@ -138,7 +141,7 @@ is_critical_cmd() {
     return 1
 }
 
-# === 检查 Termux 命令是否有效 ===
+# === 检查 Termux 命令有效性 ===
 is_termux_cmd_valid() {
     cmd="$1"
     target="$TERMUX_BIN_DIR/$cmd"
@@ -173,26 +176,37 @@ export PATH="\$PREFIX/bin:\$PATH"
 
 [ ! -d "\$PREFIX/tmp" ] && mkdir -p "\$PREFIX/tmp" 2>/dev/null
 
-exec "\$TARGET" "\$@"
+"\$TARGET" "\$@"
+exit \$?
 EOF
 }
 
-# === 确保主脚本存在且版本正确 ===
+# === 确保主脚本存在 ===
 ensure_main_wrapper() {
-    if [ ! -f "$WRAPPER_MAIN_SRC" ] || ! grep -q "# termux_path Wrapper v$WRAPPER_VERSION" "$WRAPPER_MAIN_SRC" 2>/dev/null; then
-        generate_main_wrapper > "$WRAPPER_MAIN_SRC"
-        chmod 755 "$WRAPPER_MAIN_SRC"
-        chown root:root "$WRAPPER_MAIN_SRC" 2>/dev/null
-        chcon u:object_r:system_file:s0 "$WRAPPER_MAIN_SRC" 2>/dev/null
-        log "主脚本已生成/更新到 v$WRAPPER_VERSION"
-        echo "  主脚本已更新到 v$WRAPPER_VERSION" >&2
+    if [ ! -f "$MODULE_BIN_DIR/$WRAPPER_MAIN_NAME" ] || ! grep -q "# termux_path Wrapper v$WRAPPER_VERSION" "$MODULE_BIN_DIR/$WRAPPER_MAIN_NAME" 2>/dev/null; then
+        generate_main_wrapper > "$MODULE_BIN_DIR/$WRAPPER_MAIN_NAME"
+        chmod 755 "$MODULE_BIN_DIR/$WRAPPER_MAIN_NAME"
+        chown root:root "$MODULE_BIN_DIR/$WRAPPER_MAIN_NAME" 2>/dev/null
+        chcon u:object_r:system_file:s0 "$MODULE_BIN_DIR/$WRAPPER_MAIN_NAME" 2>/dev/null
+        log "xbin 主脚本已更新到 v$WRAPPER_VERSION"
+    fi
+    if [ -f "$WHITELIST_FILE" ] && [ -s "$WHITELIST_FILE" ]; then
+        if [ ! -f "$MODULE_BIN_DIR_OVERRIDE/$WRAPPER_MAIN_NAME" ] || ! grep -q "# termux_path Wrapper v$WRAPPER_VERSION" "$MODULE_BIN_DIR_OVERRIDE/$WRAPPER_MAIN_NAME" 2>/dev/null; then
+            mkdir -p "$MODULE_BIN_DIR_OVERRIDE"
+            generate_main_wrapper > "$MODULE_BIN_DIR_OVERRIDE/$WRAPPER_MAIN_NAME"
+            chmod 755 "$MODULE_BIN_DIR_OVERRIDE/$WRAPPER_MAIN_NAME"
+            chown root:root "$MODULE_BIN_DIR_OVERRIDE/$WRAPPER_MAIN_NAME" 2>/dev/null
+            chcon u:object_r:system_file:s0 "$MODULE_BIN_DIR_OVERRIDE/$WRAPPER_MAIN_NAME" 2>/dev/null
+            log "bin 主脚本已更新到 v$WRAPPER_VERSION"
+        fi
     fi
 }
 
-# === 创建单个 wrapper（软链接，相对路径）===
+# === 创建单个 wrapper ===
 create_wrapper() {
     cmd="$1"
-    target="$MODULE_BIN_DIR/$cmd"
+    target_dir="${2:-$MODULE_BIN_DIR}"
+    target="$target_dir/$cmd"
 
     ensure_main_wrapper
 
@@ -205,11 +219,11 @@ create_wrapper() {
 
     rm -f "$target"
     ln -s "$WRAPPER_MAIN_NAME" "$target"
-    log "创建 wrapper 链接: $cmd"
+    log "创建 wrapper 链接: $cmd (目录: $target_dir)"
     return 1
 }
 
-# === 扫描 Termux 并创建软链接 ===
+# === 扫描并创建 ===
 scan_and_create() {
     total=0
     created=0
@@ -221,6 +235,19 @@ scan_and_create() {
 
         cmd=$(basename "$f")
         total=$((total + 1))
+
+        if is_whitelisted "$cmd"; then
+            create_wrapper "$cmd" "$MODULE_BIN_DIR_OVERRIDE"
+            ret=$?
+            [ $ret -eq 1 ] && created=$((created + 1)) && echo "  强制覆盖(白名单): $cmd -> bin" >&2
+            continue
+        fi
+
+        if is_blacklisted "$cmd"; then
+            skipped=$((skipped + 1))
+            echo "  跳过黑名单命令: $cmd" >&2
+            continue
+        fi
 
         if is_system_cmd "$cmd"; then
             skipped=$((skipped + 1))
@@ -234,12 +261,6 @@ scan_and_create() {
             continue
         fi
 
-        if is_blacklisted "$cmd"; then
-            skipped=$((skipped + 1))
-            echo "  跳过黑名单命令: $cmd" >&2
-            continue
-        fi
-
         create_wrapper "$cmd"
         ret=$?
         [ $ret -eq 1 ] && created=$((created + 1)) && echo "  创建 wrapper: $cmd" >&2
@@ -248,9 +269,31 @@ scan_and_create() {
     echo "$total $created $skipped"
 }
 
+# === 检查是否是我们的 wrapper ===
+is_our_wrapper() {
+    file="$1"
+    if [ -L "$file" ]; then
+        target=$(readlink "$file")
+        [ "$target" = "$WRAPPER_MAIN_NAME" ] || [ "$target" = "./$WRAPPER_MAIN_NAME" ] && return 0
+    fi
+    return 1
+}
+
 # === 清理失效 wrapper ===
 cleanup_invalid_wrappers() {
     cleaned=0
+
+    # 如果白名单文件不存在或为空，直接删除整个 bin 目录
+    if [ ! -s "$WHITELIST_FILE" ]; then
+        if [ -d "$MODULE_BIN_DIR_OVERRIDE" ]; then
+            rm -rf "$MODULE_BIN_DIR_OVERRIDE"
+            log "白名单已清空，删除 bin 目录"
+            echo "  白名单已清空，删除 bin 目录" >&2
+            cleaned=$((cleaned + 1))
+        fi
+    fi
+
+    # 清理 xbin 目录下的失效 wrapper
     for wrapper in "$MODULE_BIN_DIR"/*; do
         [ -f "$wrapper" ] || [ -L "$wrapper" ] || continue
         [ "$(basename "$wrapper")" = "$WRAPPER_MAIN_NAME" ] && continue
@@ -271,12 +314,15 @@ cleanup_invalid_wrappers() {
             cleaned=$((cleaned + 1))
         fi
     done
+
     echo "$cleaned"
 }
 
 # === 主同步流程 ===
 sync_all() {
     log "========== 开始同步 =========="
+    echo "正在加载白名单..." >&2
+    load_whitelist
     echo "正在加载黑名单..." >&2
     load_blacklist
     echo "正在扫描系统命令缓存..." >&2
@@ -328,6 +374,7 @@ run_scan() {
 
     echo "Termux 目录: $TERMUX_BIN_DIR"
     echo "Wrapper 目录: $MODULE_BIN_DIR"
+    echo "白名单文件: $WHITELIST_FILE"
     echo "黑名单文件: $BLACKLIST_FILE"
     echo ""
 
