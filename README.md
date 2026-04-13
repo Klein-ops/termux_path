@@ -12,7 +12,7 @@
 - 零冲突设计：自动跳过系统已有命令，永不覆盖原生功能
 - 实时同步：Termux 安装/卸载程序后，一键扫描即刻更新
 - 轻量安全：纯软链接架构，不复制文件，不修改系统分区
-- 环境完整继承：v3.0 起保留父 Shell 的别名、函数和自定义变量
+- 环境完整继承：v1.4.0 起保留父 Shell 的别名、函数和自定义变量
 - 精确命令匹配：使用 `/` 分隔符，消除子串误判和空格问题
 
 
@@ -22,7 +22,7 @@
 |------|------|
 | 动态扫描 | 自动发现 Termux 中所有可执行程序 |
 | 软链接架构 | 所有命令指向统一主脚本，更新仅需替换一个文件 |
-| 完整环境继承 | v3.0 起保留父 Shell 的别名、函数和所有环境变量 |
+| 完整环境继承 | v1.4.0 起保留父 Shell 的别名、函数和所有环境变量 |
 | 精确命令匹配 | 缓存使用 `/cmd/` 格式，彻底消除子串误判 |
 | SELinux 适配 | Android 10+ 自动写入策略规则，解除普通应用执行限制 |
 | 冲突避免 | 跳过系统命令、关键命令、用户黑名单三重保护 |
@@ -70,7 +70,7 @@
 5. SELinux 规则注入 → SDK ≥ 29 时写入 sepolicy.rule
 6. 精细化权限修复 → 仅对必要路径设置 755/1777
 
-缓存格式设计（v3.0 优化）：
+缓存格式设计（v1.4.0 优化）：
 旧版使用空格分隔：SYSTEM_CMDS_CACHE=" cmd1 cmd2 cmd3 "
 新版使用 `/` 分隔：SYSTEM_CMDS_CACHE="/cmd1//cmd2//cmd3/"
 
@@ -125,7 +125,7 @@ chmod 1777 /data/data/com.termux/files/usr/tmp
 
 ### 统一主脚本详解
 
-所有软链接最终都指向 wrapper_main.sh，其完整代码如下（v3.0）：
+所有软链接最终都指向 wrapper_main.sh。主脚本内部版本号为 3.0（用于更新检测），其完整代码如下：
 
 #!/system/bin/sh
 # termux_path Wrapper v3.0
@@ -179,12 +179,12 @@ exit $?
 6. exit $?
    以目标程序的退出码退出 wrapper 脚本，确保返回值正确传递。
 
-v2.0 vs v3.0 执行差异：
+v1.3.1 及更早版本 vs v1.4.0 执行差异：
 
 场景：用户在 Shell 中定义了 alias ll='ls -la'，然后执行 ll
 
-v2.0 行为：exec 替换当前 Shell → 新进程不存在 alias → 命令失败
-v3.0 行为：创建子进程继承父环境 → alias 可用 → 命令成功执行
+旧版行为：exec 替换当前 Shell → 新进程不存在 alias → 命令失败
+v1.4.0 行为：创建子进程继承父环境 → alias 可用 → 命令成功执行
 
 
 ## 📦 安装与要求
@@ -234,7 +234,7 @@ node script.js
    /data/adb/modules/termux_path/blacklist
 
 2. 每行写入一个需要屏蔽的命令名，例如：
-   （# 这是注释，会被忽略）
+   # 这是注释，会被忽略
    awk
    sed
    grep
@@ -346,7 +346,7 @@ su
    chmod 644 module.prop
 
 3. 打包
-   zip -r termux_path_v3.0.zip ./* -x ".git/*" -x "*.md" -x ".gitignore"
+   zip -r termux_path_v1.4.0.zip ./* -x ".git/*" -x "*.md" -x ".gitignore"
 
 
 ## 📄 许可证
