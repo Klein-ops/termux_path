@@ -1,9 +1,9 @@
 #!/system/bin/sh
 # termux_path 公共函数库
 # POSIX sh 兼容
+# 架构：纯函数 + 数据流水线
 
-# === 动态获取模块根目录 ===
-MODDIR=${0%/*}
+MODDIR="${0%/*}"
 [ -z "$MODDIR" ] && MODDIR="."
 
 # === 常量 ===
@@ -18,19 +18,14 @@ WHITELIST_FILE="$MODDIR/whitelist"
 SEPOLICY_FILE="$MODDIR/sepolicy.rule"
 
 WRAPPER_MAIN_NAME="wrapper_main.sh"
-WRAPPER_MAIN_SRC="$MODULE_BIN_DIR/$WRAPPER_MAIN_NAME"
-
-SYSTEM_CMDS_CACHE=""
-BLACKLIST=""
-WHITELIST=""
 
 # === 初始化环境 ===
 init_env() {
-    mkdir -p "$MODULE_BIN_DIR" "$MODULE_BIN_DIR_OVERRIDE"
-    chmod 755 "$MODDIR" "$MODDIR/system" "$MODULE_BIN_DIR" "$MODULE_BIN_DIR_OVERRIDE" 2>/dev/null
+    mkdir -p "$MODULE_BIN_DIR"
+    chmod 755 "$MODDIR" "$MODDIR/system" "$MODULE_BIN_DIR" 2>/dev/null
     chown -R root:root "$MODDIR" 2>/dev/null
 
-    sdk_version=$(getprop ro.build.version.sdk)
+    sdk_version="$(getprop ro.build.version.sdk)"
     if [ -n "$sdk_version" ] && [ "$sdk_version" -ge 29 ]; then
         if [ ! -f "$SEPOLICY_FILE" ]; then
             cat > "$SEPOLICY_FILE" << EOF
@@ -53,15 +48,21 @@ EOF
     fi
 }
 
-# === 日志 ===
+# === 日志（带轮转，上限 1MB）===
 log() {
+    if [ -f "$LOG_FILE" ]; then
+        size=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
+        if [ "$size" -gt 1048576 ]; then
+            rm -f "$LOG_FILE"
+        fi
+    fi
     echo "$(date '+%m-%d %H:%M:%S') - $*" >> "$LOG_FILE"
     chmod 644 "$LOG_FILE" 2>/dev/null
 }
 
-# === 动态获取系统默认 PATH ===
+# === 获取系统 PATH ===
 get_system_path() {
-    sys_path=$(env -i /system/bin/sh -c 'echo $PATH' 2>/dev/null)
+    sys_path="$(env -i /system/bin/sh -c 'echo $PATH' 2>/dev/null)"
     if [ -n "$sys_path" ]; then
         echo "$sys_path"
     else
@@ -69,70 +70,46 @@ get_system_path() {
     fi
 }
 
-# === 加载黑名单 ===
-load_blacklist() {
-    BLACKLIST=""
-    if [ -f "$BLACKLIST_FILE" ]; then
+# === 加载列表文件（纯函数）===
+load_list() {
+    file="$1"
+    result=""
+    if [ -f "$file" ]; then
         while IFS= read -r line || [ -n "$line" ]; do
             [ -z "$line" ] && continue
             echo "$line" | grep -q "^#" && continue
-            BLACKLIST="${BLACKLIST}/$line/"
-        done < "$BLACKLIST_FILE"
+            result="${result}/$line/"
+        done < "$file"
     fi
+    echo "$result"
 }
 
-is_blacklisted() {
+# === 检查是否在列表中（纯函数）===
+in_list() {
     cmd="$1"
-    case "$BLACKLIST" in
+    list="$2"
+    case "$list" in
         *"/$cmd/"*) return 0 ;;
         *) return 1 ;;
     esac
 }
 
-# === 加载白名单 ===
-load_whitelist() {
-    WHITELIST=""
-    if [ -f "$WHITELIST_FILE" ]; then
-        while IFS= read -r line || [ -n "$line" ]; do
-            [ -z "$line" ] && continue
-            echo "$line" | grep -q "^#" && continue
-            WHITELIST="${WHITELIST}/$line/"
-        done < "$WHITELIST_FILE"
-    fi
-}
-
-is_whitelisted() {
-    cmd="$1"
-    case "$WHITELIST" in
-        *"/$cmd/"*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-# === 系统命令缓存 ===
+# === 构建系统命令缓存（纯函数）===
 build_system_cmd_cache() {
-    SYSTEM_CMDS_CACHE=""
-    sys_path=$(get_system_path)
-    dirs=$(echo "$sys_path" | tr ':' ' ')
+    result=""
+    sys_path="$(get_system_path)"
+    dirs="$(echo "$sys_path" | tr ':' ' ')"
     for dir in $dirs; do
         if [ -d "$dir" ]; then
             for cmd in $(ls "$dir" 2>/dev/null); do
-                SYSTEM_CMDS_CACHE="${SYSTEM_CMDS_CACHE}/$cmd/"
+                result="${result}/$cmd/"
             done
         fi
     done
-    log "系统命令缓存已建立"
+    echo "$result"
 }
 
-is_system_cmd() {
-    cmd="$1"
-    case "$SYSTEM_CMDS_CACHE" in
-        *"/$cmd/"*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-# === 关键命令 ===
+# === 检查关键命令 ===
 is_critical_cmd() {
     cmd="$1"
     for c in $CRITICAL_CMDS; do
@@ -183,6 +160,8 @@ EOF
 
 # === 确保主脚本存在 ===
 ensure_main_wrapper() {
+    whitelist_file="$1"
+    
     if [ ! -f "$MODULE_BIN_DIR/$WRAPPER_MAIN_NAME" ] || ! grep -q "# termux_path Wrapper v$WRAPPER_VERSION" "$MODULE_BIN_DIR/$WRAPPER_MAIN_NAME" 2>/dev/null; then
         generate_main_wrapper > "$MODULE_BIN_DIR/$WRAPPER_MAIN_NAME"
         chmod 755 "$MODULE_BIN_DIR/$WRAPPER_MAIN_NAME"
@@ -190,9 +169,10 @@ ensure_main_wrapper() {
         chcon u:object_r:system_file:s0 "$MODULE_BIN_DIR/$WRAPPER_MAIN_NAME" 2>/dev/null
         log "xbin 主脚本已更新到 v$WRAPPER_VERSION"
     fi
-    if [ -f "$WHITELIST_FILE" ] && [ -s "$WHITELIST_FILE" ]; then
+    
+    if [ -f "$whitelist_file" ] && [ -s "$whitelist_file" ]; then
+        mkdir -p "$MODULE_BIN_DIR_OVERRIDE"
         if [ ! -f "$MODULE_BIN_DIR_OVERRIDE/$WRAPPER_MAIN_NAME" ] || ! grep -q "# termux_path Wrapper v$WRAPPER_VERSION" "$MODULE_BIN_DIR_OVERRIDE/$WRAPPER_MAIN_NAME" 2>/dev/null; then
-            mkdir -p "$MODULE_BIN_DIR_OVERRIDE"
             generate_main_wrapper > "$MODULE_BIN_DIR_OVERRIDE/$WRAPPER_MAIN_NAME"
             chmod 755 "$MODULE_BIN_DIR_OVERRIDE/$WRAPPER_MAIN_NAME"
             chown root:root "$MODULE_BIN_DIR_OVERRIDE/$WRAPPER_MAIN_NAME" 2>/dev/null
@@ -202,16 +182,14 @@ ensure_main_wrapper() {
     fi
 }
 
-# === 创建单个 wrapper ===
+# === 创建 wrapper 软链接 ===
 create_wrapper() {
     cmd="$1"
-    target_dir="${2:-$MODULE_BIN_DIR}"
+    target_dir="$2"
     target="$target_dir/$cmd"
 
-    ensure_main_wrapper
-
     if [ -L "$target" ]; then
-        link_target=$(readlink "$target")
+        link_target="$(readlink "$target")"
         if [ "$link_target" = "$WRAPPER_MAIN_NAME" ] || [ "$link_target" = "./$WRAPPER_MAIN_NAME" ]; then
             return 0
         fi
@@ -223,8 +201,12 @@ create_wrapper() {
     return 1
 }
 
-# === 扫描并创建 ===
+# === 扫描并创建（纯函数）===
 scan_and_create() {
+    whitelist="$1"
+    blacklist="$2"
+    system_cmds="$3"
+    
     total=0
     created=0
     skipped=0
@@ -233,23 +215,23 @@ scan_and_create() {
         [ -f "$f" ] || [ -L "$f" ] || continue
         [ -x "$f" ] || continue
 
-        cmd=$(basename "$f")
+        cmd="$(basename "$f")"
         total=$((total + 1))
 
-        if is_whitelisted "$cmd"; then
+        if in_list "$cmd" "$whitelist"; then
             create_wrapper "$cmd" "$MODULE_BIN_DIR_OVERRIDE"
-            ret=$?
-            [ $ret -eq 1 ] && created=$((created + 1)) && echo "  强制覆盖(白名单): $cmd -> bin" >&2
+            ret="$?"
+            [ "$ret" -eq 1 ] && created=$((created + 1)) && echo "  强制覆盖(白名单): $cmd -> bin" >&2
             continue
         fi
 
-        if is_blacklisted "$cmd"; then
+        if in_list "$cmd" "$blacklist"; then
             skipped=$((skipped + 1))
             echo "  跳过黑名单命令: $cmd" >&2
             continue
         fi
 
-        if is_system_cmd "$cmd"; then
+        if in_list "$cmd" "$system_cmds"; then
             skipped=$((skipped + 1))
             echo "  跳过系统命令: $cmd" >&2
             continue
@@ -261,9 +243,9 @@ scan_and_create() {
             continue
         fi
 
-        create_wrapper "$cmd"
-        ret=$?
-        [ $ret -eq 1 ] && created=$((created + 1)) && echo "  创建 wrapper: $cmd" >&2
+        create_wrapper "$cmd" "$MODULE_BIN_DIR"
+        ret="$?"
+        [ "$ret" -eq 1 ] && created=$((created + 1)) && echo "  创建 wrapper: $cmd" >&2
     done
 
     echo "$total $created $skipped"
@@ -273,7 +255,7 @@ scan_and_create() {
 is_our_wrapper() {
     file="$1"
     if [ -L "$file" ]; then
-        target=$(readlink "$file")
+        target="$(readlink "$file")"
         [ "$target" = "$WRAPPER_MAIN_NAME" ] || [ "$target" = "./$WRAPPER_MAIN_NAME" ] && return 0
     fi
     return 1
@@ -281,9 +263,10 @@ is_our_wrapper() {
 
 # === 清理失效 wrapper ===
 cleanup_invalid_wrappers() {
+    whitelist="$1"
+    blacklist="$2"
     cleaned=0
 
-    # 如果白名单文件不存在或为空，直接删除整个 bin 目录
     if [ ! -s "$WHITELIST_FILE" ]; then
         if [ -d "$MODULE_BIN_DIR_OVERRIDE" ]; then
             rm -rf "$MODULE_BIN_DIR_OVERRIDE"
@@ -291,17 +274,30 @@ cleanup_invalid_wrappers() {
             echo "  白名单已清空，删除 bin 目录" >&2
             cleaned=$((cleaned + 1))
         fi
+    else
+        for wrapper in "$MODULE_BIN_DIR_OVERRIDE"/*; do
+            [ -f "$wrapper" ] || [ -L "$wrapper" ] || continue
+            [ "$(basename "$wrapper")" = "$WRAPPER_MAIN_NAME" ] && continue
+
+            is_our_wrapper "$wrapper" || continue
+            cmd="$(basename "$wrapper")"
+
+            if ! in_list "$cmd" "$whitelist"; then
+                rm -f "$wrapper"
+                log "白名单移除，清理 wrapper: $cmd"
+                cleaned=$((cleaned + 1))
+            fi
+        done
     fi
 
-    # 清理 xbin 目录下的失效 wrapper
     for wrapper in "$MODULE_BIN_DIR"/*; do
         [ -f "$wrapper" ] || [ -L "$wrapper" ] || continue
         [ "$(basename "$wrapper")" = "$WRAPPER_MAIN_NAME" ] && continue
 
         is_our_wrapper "$wrapper" || continue
-        cmd=$(basename "$wrapper")
+        cmd="$(basename "$wrapper")"
 
-        if is_blacklisted "$cmd"; then
+        if in_list "$cmd" "$blacklist"; then
             rm -f "$wrapper"
             log "清理黑名单 wrapper: $cmd"
             cleaned=$((cleaned + 1))
@@ -321,34 +317,36 @@ cleanup_invalid_wrappers() {
 # === 主同步流程 ===
 sync_all() {
     log "========== 开始同步 =========="
+    
     echo "正在加载白名单..." >&2
-    load_whitelist
+    whitelist="$(load_list "$WHITELIST_FILE")"
     echo "正在加载黑名单..." >&2
-    load_blacklist
+    blacklist="$(load_list "$BLACKLIST_FILE")"
+    
     echo "正在扫描系统命令缓存..." >&2
-    build_system_cmd_cache
-    echo "正在扫描 Termux 命令..." >&2
-
-    ensure_main_wrapper
-
+    system_cmds="$(build_system_cmd_cache)"
+    
+    ensure_main_wrapper "$WHITELIST_FILE"
+    
     if [ ! -d "$TERMUX_BIN_DIR" ]; then
         log "Termux 未安装"
         echo "错误: Termux 未安装" >&2
         return 1
     fi
-
-    result=$(scan_and_create)
+    
+    echo "正在扫描 Termux 命令..." >&2
+    result="$(scan_and_create "$whitelist" "$blacklist" "$system_cmds")"
     set -- $result
-    total=$1
-    created=$2
-    skipped=$3
-
+    total="$1"
+    created="$2"
+    skipped="$3"
+    
     echo "" >&2
     echo "正在清理失效 wrapper..." >&2
-    cleaned=$(cleanup_invalid_wrappers)
-
-    [ $cleaned -gt 0 ] && echo "  清理了 $cleaned 个失效 wrapper" >&2
-
+    cleaned="$(cleanup_invalid_wrappers "$whitelist" "$blacklist")"
+    
+    [ "$cleaned" -gt 0 ] && echo "  清理了 $cleaned 个失效 wrapper" >&2
+    
     log "同步完成 - 总计:$total 新增:$created 跳过:$skipped 清理:$cleaned"
     log "========== 同步结束 =========="
 
@@ -378,7 +376,7 @@ run_scan() {
     echo "黑名单文件: $BLACKLIST_FILE"
     echo ""
 
-    result=$(sync_all)
+    result="$(sync_all)"
     set -- $result
 
     echo ""
