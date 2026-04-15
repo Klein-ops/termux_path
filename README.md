@@ -12,9 +12,10 @@
 - 零冲突设计：自动跳过系统已有命令，永不覆盖原生功能（除非你主动加入白名单）
 - 实时同步：Termux 安装/卸载程序后，一键扫描即刻更新
 - 轻量安全：纯软链接架构，不复制文件，不修改系统分区
-- 环境完整继承：v1.4.0 起保留父 Shell 的别名、函数和自定义变量
+- 环境完整继承：保留父 Shell 的别名、函数和自定义变量
 - 精确命令匹配：使用 `/` 分隔符，消除子串误判和空格问题
-- 白名单强制覆盖：v1.5.0 起支持指定命令优先于系统版本
+- 白名单强制覆盖：支持指定命令覆盖系统版本（放置到 /system/bin）
+- 架构清晰：纯函数 + 数据流水线，稳定可靠
 
 
 ## ✨ 功能全景
@@ -23,12 +24,12 @@
 |------|------|
 | 动态扫描 | 自动发现 Termux 中所有可执行程序 |
 | 软链接架构 | 所有命令指向统一主脚本，更新仅需替换一个文件 |
-| 完整环境继承 | v1.4.0 起保留父 Shell 的别名、函数和所有环境变量 |
+| 完整环境继承 | 保留父 Shell 的别名、函数和所有环境变量 |
 | 精确命令匹配 | 缓存使用 `/cmd/` 格式，彻底消除子串误判 |
 | SELinux 适配 | Android 10+ 自动写入策略规则，解除普通应用执行限制 |
 | 冲突避免 | 跳过系统命令、关键命令、用户黑名单三重保护 |
-| 白名单强制覆盖 | v1.5.0 起支持指定命令覆盖系统版本（放置到 /system/bin） |
-| 自动清理 | Termux 卸载程序后，对应 wrapper 自动移除 |
+| 白名单强制覆盖 | 支持指定命令覆盖系统版本（放置到 /system/bin） |
+| 自动清理 | Termux 卸载程序后，对应 wrapper 自动移除；白名单移除后也自动清理 |
 | 精细化权限修复 | 仅修改必要目录，不对 Termux 数据目录过度干预 |
 | 用户黑名单 | 自定义屏蔽不希望暴露的命令 |
 | POSIX 兼容 | 纯 POSIX sh 语法，所有设备通用 |
@@ -58,81 +59,48 @@
 4. 软链接指向同目录的 wrapper_main.sh
 5. 主脚本解析命令名，设置 Termux 环境，执行真实二进制
 
-这种设计的优势：
-- 空间高效：N 个命令仅占用 N 个软链接
-- 维护简单：更新主脚本版本，所有命令行为同步升级
-- 灵活控制：白名单可强制覆盖系统命令，黑名单可屏蔽不想暴露的命令
-- 挂载友好：相对路径软链接，模块可被 Magisk 挂载到任意位置
+### 核心设计原则（v2.0.0 重构）
+
+整个脚本遵循「纯函数 + 数据流水线」设计：
+
+- 无全局状态变量：所有数据通过函数参数传递，消除隐式依赖
+- 通用列表抽象：load_list() 将配置文件转换为统一格式，in_list() 进行精确匹配
+- 函数无副作用：扫描和清理函数仅依赖输入参数，输出确定结果
+- 主流程清晰：sync_all() 按「加载配置 → 构建缓存 → 扫描创建 → 清理失效」顺序编排
 
 ### 工作流程
 
-模块的核心逻辑封装在公共函数库中，按以下三个阶段顺序执行：
-
 #### 阶段一：环境初始化
 
-初始化顺序：
-1. 获取模块根目录 → 确保路径定位准确
-2. 创建双目录结构 → /system/bin 和 /system/xbin
-3. 加载白名单 → 读取 /data/adb/modules/termux_path/whitelist
-4. 加载黑名单 → 读取 /data/adb/modules/termux_path/blacklist
-5. 获取纯净系统 PATH → 通过 env -i 避免环境污染
-6. 构建系统命令缓存 → 遍历 PATH 目录，使用 `/cmd/` 格式存入内存
-7. SELinux 规则注入 → SDK ≥ 29 时写入 sepolicy.rule
-8. 精细化权限修复 → 仅对必要路径设置 755/1777
+1. 创建 /system/xbin 目录并设置权限（bin 目录按需创建）
+2. Android 10+ 注入 SELinux 规则，允许执行 Termux 数据目录文件
+3. 精细化修复 Termux 必要目录权限（755/1777）
 
-缓存格式设计（v1.4.0 优化）：
-使用 `/` 分隔：SYSTEM_CMDS_CACHE="/cmd1//cmd2//cmd3/"
-匹配时检查 *"/$cmd/"*，实现真正的全词匹配。
+#### 阶段二：数据准备
 
-白名单与黑名单格式：
-同样使用 `/cmd/` 格式存储，支持 # 注释和空行。
+1. 通过 load_list 加载白名单和黑名单，返回格式如 `/cmd1//cmd2/`
+2. 调用 build_system_cmd_cache 扫描系统 PATH，返回同格式的命令缓存
+3. 确保主脚本 wrapper_main.sh 在 xbin 目录存在，若白名单非空则在 bin 目录也创建副本
 
-SELinux 规则详情（Android 10+）：
-allow * app_data_file file execute_no_trans
-allow * privapp_data_file file execute_no_trans
+#### 阶段三：命令扫描与链接创建
 
-权限修复详情：
-chmod 755 /data/data/com.termux
-chmod 755 /data/data/com.termux/files
-chmod -R 755 /data/data/com.termux/files/usr
-chmod 1777 /data/data/com.termux/files/usr/tmp
+遍历 Termux bin 目录下所有可执行文件，按优先级处理：
 
-#### 阶段二：命令扫描与链接创建
+1. 白名单命中 → 创建到 /system/bin，跳过后续检查
+2. 黑名单命中 → 跳过
+3. 系统命令冲突 → 跳过
+4. 关键命令黑名单 → 跳过
+5. 通过所有检查 → 创建到 /system/xbin
 
-遍历 /data/data/com.termux/files/usr/bin/* 下的每个可执行文件，执行分类处理：
+#### 阶段四：失效清理
 
-第一优先：白名单检查
-如果命令在白名单中，直接创建 wrapper 到 /system/bin 目录，跳过所有后续检查。
-这意味着即使该命令与系统命令同名，也会被强制覆盖。
-
-第二层：黑名单检查
-如果命令在黑名单中，跳过，不创建任何 wrapper。
-
-第三层：系统命令冲突检查
-通过精确全词匹配检查系统 PATH 中是否已有同名命令。若存在则跳过。
-
-第四层：关键命令检查
-内置黑名单包含：su、mount、umount、reboot、shutdown、magisk、magiskpolicy、resetprop。
-这些命令即使存在于 Termux 中也不会被链接。
-
-通过所有检查后，在 /system/xbin 目录下创建软链接。
-
-白名单清空时的自动清理：
-如果 whitelist 文件被清空或删除，下次扫描时会自动删除整个 /system/bin 目录，确保不会残留之前白名单中的命令。
-
-#### 阶段三：失效清理
-
-遍历 /system/xbin 目录下的所有软链接，执行两类清理：
-
-清理一：黑名单清理
-如果命令已被加入黑名单，删除其 wrapper。
-
-清理二：有效性清理
-如果 Termux 中对应的源命令已不存在，删除其 wrapper。
+1. 白名单为空时，直接删除整个 /system/bin 目录
+2. 白名单非空时，遍历 /system/bin 清理不在白名单中的 wrapper
+3. 遍历 /system/xbin 清理黑名单中的 wrapper 和 Termux 已卸载的命令
 
 ### 统一主脚本详解
 
-所有软链接最终都指向 wrapper_main.sh。主脚本内部版本号为 3.0（用于更新检测），其完整代码如下：
+所有软链接最终都指向 wrapper_main.sh（内部版本 3.0）：
 
 #!/system/bin/sh
 # termux_path Wrapper v3.0
@@ -162,29 +130,9 @@ export PATH="$PREFIX/bin:$PATH"
 "$TARGET" "$@"
 exit $?
 
-执行流程逐行解析：
-
-1. CMD=$(basename "$0")
-   获取用户调用的命令名，即软链接的名称。
-
-2. TARGET="$PREFIX/bin/$CMD"
-   拼接 Termux 中对应二进制文件的完整路径。
-
-3. 文件存在性与权限检查
-   验证目标文件存在且可执行，失败则返回标准错误码。
-
-4. 环境变量设置
-   - HOME：Termux 用户主目录
-   - TMPDIR：临时文件目录
-   - PREFIX：Termux 安装前缀
-   - LD_LIBRARY_PATH：动态链接库搜索路径
-   - PATH：将 Termux bin 目录前置
-
-5. "$TARGET" "$@"
-   直接执行目标程序并传递所有参数。创建子进程但不替换当前 Shell，因此父 Shell 中的别名、函数和自定义变量都能被完整继承。
-
-6. exit $?
-   以目标程序的退出码退出，确保返回值正确传递。
+关键设计点：
+- 使用 "$TARGET" "$@" 而非 exec，确保父 Shell 的别名、函数和自定义变量完整继承
+- exit $? 正确传递原命令的退出码
 
 
 ## 📦 安装与要求
@@ -196,233 +144,74 @@ exit $?
 
 安装步骤：
 1. 下载本模块的 .zip 压缩包
-2. 打开 Magisk Manager 应用
-3. 进入「模块」页面
-4. 点击「从本地安装」
-5. 选择下载的压缩包文件
-6. 等待刷入过程自动完成
-7. 根据提示重启手机
-
-重启后模块即会生效，无需额外配置。
+2. 打开 Magisk Manager，进入「模块」页面
+3. 点击「从本地安装」选择压缩包
+4. 等待刷入完成，根据提示重启手机
 
 
 ## 🚀 使用方法
 
-### 日常使用（自动生效）
+### 日常使用
 
-重启后，模块已在后台完成初始扫描。你可以直接在任意终端 App 中执行 Termux 程序：
+重启后模块自动完成扫描，即可在任意终端直接使用 Termux 程序。
 
-# 在 adb shell 中直接使用
-adb shell
-python --version
-ffmpeg -i input.mp4 output.avi
-youtube-dl "https://www.youtube.com/watch?v=..."
+### 白名单强制覆盖
 
-# 在 MT 管理器终端中使用
-vim /sdcard/notes.txt
-nano /data/local/tmp/config.conf
+如果需要 Termux 版本的命令覆盖系统同名命令（如 awk、grep、sed）：
 
-# 在 Terminal Emulator 等本地终端中使用
-git clone https://github.com/example/repo.git
-node script.js
+1. 创建或编辑 /data/adb/modules/termux_path/whitelist
+2. 每行写入一个命令名，支持 # 注释
+3. 保存后手动执行一次扫描
 
-### 用户自定义黑名单
+白名单中的命令将被创建到 /system/bin，优先级高于系统原生命令。
 
-如果你不希望某些 Termux 命令被暴露到系统 PATH，可以通过黑名单文件进行控制。
+### 黑名单屏蔽
 
-1. 在模块根目录下创建或编辑 blacklist 文件：
-   /data/adb/modules/termux_path/blacklist
+如果不想暴露某些 Termux 命令：
 
-2. 每行写入一个需要屏蔽的命令名，例如：
-   # 这是注释，会被忽略
-   awk
-   sed
-   grep
+1. 创建或编辑 /data/adb/modules/termux_path/blacklist
+2. 每行写入一个命令名
+3. 保存后手动执行一次扫描
 
-3. 保存文件后，触发一次手动扫描，被列入黑名单的命令对应的 wrapper 将被自动清理，且后续扫描不会再创建。
+### 手动触发扫描
 
-### 白名单强制覆盖（v1.5.0 新增）
+安装新命令或修改黑白名单后，通过 Magisk Manager 模块页面的「操作」按钮执行扫描，或在 Root 终端执行：
 
-如果你希望某个 Termux 命令优先于系统同名命令被执行，可以使用白名单功能。
-
-典型场景：
-- Termux 中的 awk/grep/sed 比系统 busybox 版本功能更完整
-- Termux 中的 find 支持更多选项
-- Termux 中的 vim 希望替代系统 vi
-
-配置方法：
-
-1. 在模块根目录下创建或编辑 whitelist 文件：
-   /data/adb/modules/termux_path/whitelist
-
-2. 每行写入一个需要强制覆盖的命令名，例如：
-   # 强制使用 Termux 版本的这些命令
-   awk
-   grep
-   sed
-   find
-   vim
-
-3. 保存文件后，触发一次手动扫描。白名单中的命令将被创建到 /system/bin 目录，由于该目录在系统 PATH 中优先级更高，这些命令将覆盖系统版本。
-
-清空白名单：
-如果不再需要强制覆盖，删除 whitelist 文件或清空其内容，然后手动扫描一次，/system/bin 目录将被自动清理。
-
-### 安装新命令后（手动触发扫描）
-
-当你在 Termux 中通过 pkg install 安装新程序后，需要让模块感知到这一变化。
-
-方法一：通过 Magisk Manager 一键执行
-
-1. 打开 Magisk Manager
-2. 进入「模块」页面
-3. 找到名为「Termux PATH Bridge」的模块
-4. 点击模块底部的「操作」按钮
-5. 在弹出的终端窗口中，模块会自动执行扫描并输出详细统计信息
-6. 等待输出完成，新命令立即可用
-
-扫描输出示例：
-
-termux_path - 手动扫描
-====================
-Termux 目录: /data/data/com.termux/files/usr/bin
-Wrapper 目录: /data/adb/modules/termux_path/system/xbin
-白名单文件: /data/adb/modules/termux_path/whitelist
-黑名单文件: /data/adb/modules/termux_path/blacklist
-
-正在加载白名单...
-正在加载黑名单...
-正在扫描系统命令缓存...
-正在扫描 Termux 命令...
-  强制覆盖(白名单): awk -> bin
-  强制覆盖(白名单): grep -> bin
-  创建 wrapper: python
-  创建 wrapper: ffmpeg
-  跳过系统命令: sh
-  跳过关键命令: su
-  跳过黑名单命令: sed
-...
-
-====================
-扫描完成!
-====================
-总计 Termux 命令: 452
-新增 wrapper: 5
-跳过 (系统/关键/黑名单): 55
-清理失效 wrapper: 2
-
-日志文件: /data/local/tmp/termux_path.log
-
-方法二：在 Root 终端中手动执行
-
-# 获取 Root 权限
 su
-
-# 执行模块提供的扫描函数
 . /data/adb/modules/termux_path/termux_path_common.sh && run_scan
 
 
 ## 📝 注意事项
 
-1. SELinux 策略说明
-   在 Android 10 及以上系统中，本模块会自动生成 sepolicy.rule 文件，允许普通应用执行 Termux 数据目录下的二进制文件。该规则由 Magisk 在启动时加载，无需用户操作。
-
-2. 权限修改说明
-   本模块在开机时会执行精细化的权限修复：仅针对 Termux 的必要目录设置权限，不递归修改整个应用数据目录，从而在保障外部调用可用性的同时，最大程度减少对 Termux 自身文件权限的干扰。
-
-3. 日志文件
-   所有操作都会写入 /data/local/tmp/termux_path.log。遇到问题时请优先查看此文件。
-
-4. 白名单与系统命令的关系
-   白名单中的命令会覆盖系统同名命令。请确保你了解这一行为的后果，避免覆盖关键系统命令导致系统不稳定。内置关键命令黑名单（su、mount 等）即使在白名单中也不会被覆盖。
-
-5. 白名单清空后的行为
-   删除或清空 whitelist 文件后，下次扫描会自动删除整个 /system/bin 目录。这是预期行为，确保白名单功能关闭后不留残留。
+- SELinux 规则在 Android 10+ 自动生效，无需干预
+- 权限修复仅针对必要目录，不影响 Termux 自身
+- 日志文件位于 /data/local/tmp/termux_path.log，超过 1MB 自动轮转
+- 关键命令（su、mount 等）即使在白名单中也不会被覆盖
 
 
 ## 🔧 故障排查
 
-### 问题：命令在终端中无法执行，提示 "command not found"
-
-可能原因及解决方法：
-
-1. 命令尚未被扫描 → 手动执行一次扫描
-2. Termux 中未安装该命令 → pkg install 安装
-3. 模块未正确加载 → 检查 Magisk 模块状态
-4. 命令被加入黑名单 → 检查 blacklist 文件
-
-### 问题：执行命令时报 "Permission denied"
-
-可能原因及解决方法：
-
-1. Termux 文件权限异常 → 重启手机触发权限修复
-2. SELinux 上下文问题 → 重启手机执行 restorecon
-3. SELinux 规则未生效 → 检查 sepolicy.rule 是否存在
-
-### 问题：白名单命令没有覆盖系统版本
-
-可能原因及解决方法：
-
-1. 白名单文件路径错误 → 确认文件位于 /data/adb/modules/termux_path/whitelist
-2. 未触发扫描 → 手动执行一次扫描
-3. 命令在关键命令黑名单中 → 关键命令即使在白名单中也不会被覆盖（安全设计）
-4. 检查 PATH 顺序 → 执行 echo $PATH 确认 /system/bin 在最前面
-
-### 问题：清空白名单后命令仍然存在
-
-可能原因及解决方法：
-
-1. 未触发扫描 → 删除 whitelist 后需要手动执行一次扫描，模块才会清理 /system/bin 目录
-2. 手动检查 → 执行 ls -la /system/bin/ 查看是否还有残留软链接
-
-### 问题：某些 Termux 命令没有被创建 wrapper
-
-可能原因：
-
-1. 与系统命令同名且不在白名单中 → 预期行为，如需覆盖请加入白名单
-2. 在关键命令列表中 → 安全设计
-3. 在黑名单中 → 检查 blacklist 文件
-4. 在 Termux 中不可执行 → 检查文件权限
+常见问题：
+- command not found：手动扫描或检查 Termux 是否安装
+- Permission denied：重启手机或手动执行 restorecon
+- 白名单未生效：检查文件路径和内容，确认已触发扫描
+- 白名单命令残留：升级到 v2.0.0 后扫描一次即可自动清理
 
 
 ## 🔨 编译与打包
 
-1. 克隆仓库
-   git clone https://github.com/Klein-ops/termux_path.git
-   cd termux_path
-
-2. 设置脚本权限
-   chmod 755 service.sh action.sh customize.sh uninstall.sh
-   chmod 644 module.prop
-
-3. （可选）创建默认配置文件
-   touch blacklist whitelist
-
-4. 打包
-   zip -r termux_path_v1.5.0.zip ./* -x ".git/*" -x "*.md" -x ".gitignore"
+git clone https://github.com/Klein-ops/termux_path.git
+cd termux_path
+chmod 755 service.sh action.sh customize.sh uninstall.sh
+zip -r termux_path_v2.0.0.zip ./* -x ".git/*" -x "*.md" -x ".gitignore"
 
 
 ## 📄 许可证
 
-MIT License
-
-版权所有 (c) 2026 Klein-ops
-
-本软件按「原样」提供，不作任何明示或默示的保证。
-完整许可证文本请查看仓库中的 LICENSE 文件。
-
-
-## 🙏 致谢
-
-- Magisk 团队提供的模块开发框架
-- Termux 项目提供的强大终端环境
-- 所有测试和反馈问题的用户
+MIT License (c) 2026 Klein-ops
 
 
 ## 📮 反馈与贡献
 
-- 问题报告：请在 GitHub Issues 中提交，附上日志文件
-- 功能建议：欢迎在 Issues 中讨论
-- 代码贡献：请 Fork 仓库后提交 Pull Request
-
 GitHub 仓库：https://github.com/Klein-ops/termux_path
+问题报告请附上 /data/local/tmp/termux_path.log
