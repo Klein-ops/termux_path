@@ -13,7 +13,7 @@
 - 实时同步：Termux 安装/卸载程序后，一键扫描即刻更新
 - 轻量安全：纯软链接架构，不复制文件，不修改系统分区
 - 环境完整继承：保留父 Shell 的别名、函数和自定义变量
-- 精确命令匹配：使用 `/` 分隔符，消除子串误判和空格问题
+- 精确命令匹配：使用 / 分隔符，消除子串误判和空格问题
 - 白名单强制覆盖：支持指定命令覆盖系统版本（放置到 /system/bin）
 - 架构清晰：纯函数 + 数据流水线，稳定可靠
 
@@ -25,7 +25,7 @@
 | 动态扫描 | 自动发现 Termux 中所有可执行程序 |
 | 软链接架构 | 所有命令指向统一主脚本，更新仅需替换一个文件 |
 | 完整环境继承 | 保留父 Shell 的别名、函数和所有环境变量 |
-| 精确命令匹配 | 缓存使用 `/cmd/` 格式，彻底消除子串误判 |
+| 精确命令匹配 | 缓存使用 /cmd/ 格式，彻底消除子串误判 |
 | SELinux 适配 | Android 10+ 自动写入策略规则，解除普通应用执行限制 |
 | 冲突避免 | 跳过系统命令、关键命令、用户黑名单三重保护 |
 | 白名单强制覆盖 | 支持指定命令覆盖系统版本（放置到 /system/bin） |
@@ -59,7 +59,7 @@
 4. 软链接指向同目录的 wrapper_main.sh
 5. 主脚本解析命令名，设置 Termux 环境，执行真实二进制
 
-### 核心设计原则（v2.0.0 重构）
+### 核心设计原则
 
 整个脚本遵循「纯函数 + 数据流水线」设计：
 
@@ -78,7 +78,7 @@
 
 #### 阶段二：数据准备
 
-1. 通过 load_list 加载白名单和黑名单，返回格式如 `/cmd1//cmd2/`
+1. 通过 load_list 加载白名单和黑名单，返回格式如 /cmd1//cmd2/
 2. 调用 build_system_cmd_cache 扫描系统 PATH，返回同格式的命令缓存
 3. 确保主脚本 wrapper_main.sh 在 xbin 目录存在，若白名单非空则在 bin 目录也创建副本
 
@@ -195,7 +195,14 @@ su
 - command not found：手动扫描或检查 Termux 是否安装
 - Permission denied：重启手机或手动执行 restorecon
 - 白名单未生效：检查文件路径和内容，确认已触发扫描
-- 白名单命令残留：升级到 v2.0.0 后扫描一次即可自动清理
+- 白名单命令残留：升级后扫描一次即可自动清理
+
+提交 Issue 时请启用调试模式：
+1. touch /data/adb/modules/termux_path/debug
+2. 手动执行一次扫描
+3. 上传以下两个文件：
+   - /data/local/tmp/termux_path.log
+   - /data/local/tmp/termux_path-debug.log
 
 
 ## 🔨 编译与打包
@@ -203,7 +210,7 @@ su
 git clone https://github.com/Klein-ops/termux_path.git
 cd termux_path
 chmod 755 service.sh action.sh customize.sh uninstall.sh
-zip -r termux_path_v2.0.0.zip ./* -x ".git/*" -x "*.md" -x ".gitignore"
+zip -r termux_path_v2.1.0.zip ./* -x ".git/*" -x "*.md" -x ".gitignore"
 
 
 ## 📄 许可证
@@ -214,4 +221,4 @@ MIT License (c) 2026 Klein-ops
 ## 📮 反馈与贡献
 
 GitHub 仓库：https://github.com/Klein-ops/termux_path
-问题报告请附上 /data/local/tmp/termux_path.log
+问题报告请按照故障排查章节启用调试模式并上传两份日志。
