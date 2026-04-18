@@ -29,7 +29,6 @@ WRAPPER_VERSION="3.0"
 CRITICAL_CMDS="su mount umount reboot shutdown magisk magiskpolicy resetprop"
 BLACKLIST_FILE="$MODDIR/blacklist"
 WHITELIST_FILE="$MODDIR/whitelist"
-SEPOLICY_FILE="$MODDIR/sepolicy.rule"
 
 WRAPPER_MAIN_NAME="wrapper_main.sh"
 
@@ -38,18 +37,6 @@ init_env() {
     run_quiet mkdir -p "$MODULE_BIN_DIR"
     run_quiet chmod 755 "$MODDIR" "$MODDIR/system" "$MODULE_BIN_DIR"
     run_quiet chown -R root:root "$MODDIR"
-
-    sdk_version="$(getprop ro.build.version.sdk)"
-    if [ -n "$sdk_version" ] && [ "$sdk_version" -ge 29 ]; then
-        if [ ! -f "$SEPOLICY_FILE" ]; then
-            cat > "$SEPOLICY_FILE" << EOF
-allow * app_data_file file execute_no_trans
-allow * privapp_data_file file execute_no_trans
-EOF
-            run_quiet chmod 644 "$SEPOLICY_FILE"
-            log "SELinux 规则已写入 (SDK $sdk_version)"
-        fi
-    fi
 
     if [ -d "/data/data/com.termux" ]; then
         run_quiet restorecon -R /data/data/com.termux
@@ -141,34 +128,54 @@ is_termux_cmd_valid() {
 
 # === 生成主脚本内容 ===
 generate_main_wrapper() {
-    cat << EOF
+    cat << 'EOF'
 #!/system/bin/sh
-# termux_path Wrapper v$WRAPPER_VERSION
+# termux_path Wrapper v3.0
 
-CMD=\$(basename "\$0")
+CMD=$(basename "$0")
 PREFIX="/data/data/com.termux/files/usr"
-TARGET="\$PREFIX/bin/\$CMD"
+TARGET="$PREFIX/bin/$CMD"
 
-if [ ! -f "\$TARGET" ]; then
-    echo "错误: Termux 中未安装命令 '\$CMD'" >&2
+if [ ! -f "$TARGET" ]; then
+    echo "错误: Termux 中未安装命令 '$CMD'" >&2
     exit 127
 fi
 
-if [ ! -x "\$TARGET" ]; then
-    echo "错误: 权限不足，无法执行 '\$CMD'" >&2
+if [ ! -x "$TARGET" ]; then
+    echo "错误: 权限不足，无法执行 '$CMD'" >&2
     exit 126
 fi
 
-export HOME="\$PREFIX/home"
-export TMPDIR="\$PREFIX/tmp"
-export PREFIX="\$PREFIX"
-[ -n "\$LD_LIBRARY_PATH" ] && export LD_LIBRARY_PATH="\$PREFIX/lib:\$LD_LIBRARY_PATH" || export LD_LIBRARY_PATH="\$PREFIX/lib"
-export PATH="\$PREFIX/bin:\$PATH"
+export HOME="$PREFIX/home"
+export TMPDIR="$PREFIX/tmp"
+export PREFIX="$PREFIX"
+[ -n "$LD_LIBRARY_PATH" ] && export LD_LIBRARY_PATH="$PREFIX/lib:$LD_LIBRARY_PATH" || export LD_LIBRARY_PATH="$PREFIX/lib"
+export PATH="$PREFIX/bin:$PATH"
 
-[ ! -d "\$PREFIX/tmp" ] && mkdir -p "\$PREFIX/tmp" 2>/dev/null
+[ ! -d "$PREFIX/tmp" ] && mkdir -p "$PREFIX/tmp" 2>/dev/null
 
-"\$TARGET" "\$@"
-exit \$?
+sdk_version=$(getprop ro.build.version.sdk 2>/dev/null)
+if [ -z "$sdk_version" ]; then
+    sdk_version=0
+fi
+
+if [ "$sdk_version" -ge 29 ]; then
+    file_output=$(file "$TARGET" 2>/dev/null)
+    case "$file_output" in
+        *"64-bit"*)
+            linker="linker64"
+            ;;
+        *"32-bit"*)
+            linker="linker"
+            ;;
+        *)
+            exec "$TARGET" "$@"
+            ;;
+    esac
+    exec "$linker" "$TARGET" "$@"
+else
+    exec "$TARGET" "$@"
+fi
 EOF
 }
 
