@@ -8,7 +8,7 @@
 ## ⚡ 为什么选择它
 
 - 开箱即用：重启手机自动完成扫描，无需任何配置
-- Android 10+ 全兼容：自动注入 SELinux 规则，普通应用（无 Root）也能调用 Termux 命令
+- Android 10+ 全兼容：动态选择 linker，普通应用（无 Root）也能调用 Termux 命令
 - 零冲突设计：自动跳过系统已有命令，永不覆盖原生功能（除非你主动加入白名单）
 - 实时同步：Termux 安装/卸载程序后，一键扫描即刻更新
 - 轻量安全：纯软链接架构，不复制文件，不修改系统分区
@@ -26,7 +26,7 @@
 | 软链接架构 | 所有命令指向统一主脚本，更新仅需替换一个文件 |
 | 完整环境继承 | 保留父 Shell 的别名、函数和所有环境变量 |
 | 精确命令匹配 | 缓存使用 /cmd/ 格式，彻底消除子串误判 |
-| SELinux 适配 | Android 10+ 自动写入策略规则，解除普通应用执行限制 |
+| 动态 linker 选择 | Android 10+ 自动检测 32/64 位并选择正确 linker |
 | 冲突避免 | 跳过系统命令、关键命令、用户黑名单三重保护 |
 | 白名单强制覆盖 | 支持指定命令覆盖系统版本（放置到 /system/bin） |
 | 自动清理 | Termux 卸载程序后，对应 wrapper 自动移除；白名单移除后也自动清理 |
@@ -57,7 +57,7 @@
 2. 白名单命令在 /system/bin 中被找到，优先执行
 3. 普通命令在 /system/xbin 中被找到（前提是不与系统命令冲突）
 4. 软链接指向同目录的 wrapper_main.sh
-5. 主脚本解析命令名，设置 Termux 环境，执行真实二进制
+5. 主脚本解析命令名，设置 Termux 环境，动态选择 linker 执行
 
 ### 核心设计原则
 
@@ -73,8 +73,7 @@
 #### 阶段一：环境初始化
 
 1. 创建 /system/xbin 目录并设置权限（bin 目录按需创建）
-2. Android 10+ 注入 SELinux 规则，允许执行 Termux 数据目录文件
-3. 精细化修复 Termux 必要目录权限（755/1777）
+2. 精细化修复 Termux 必要目录权限（755/1777）
 
 #### 阶段二：数据准备
 
@@ -127,12 +126,33 @@ export PATH="$PREFIX/bin:$PATH"
 
 [ ! -d "$PREFIX/tmp" ] && mkdir -p "$PREFIX/tmp" 2>/dev/null
 
-"$TARGET" "$@"
-exit $?
+sdk_version=$(getprop ro.build.version.sdk 2>/dev/null)
+if [ -z "$sdk_version" ]; then
+    sdk_version=0
+fi
+
+if [ "$sdk_version" -ge 29 ]; then
+    file_output=$(file "$TARGET" 2>/dev/null)
+    case "$file_output" in
+        *"64-bit"*)
+            linker="linker64"
+            ;;
+        *"32-bit"*)
+            linker="linker"
+            ;;
+        *)
+            exec "$TARGET" "$@"
+            ;;
+    esac
+    exec "$linker" "$TARGET" "$@"
+else
+    exec "$TARGET" "$@"
+fi
 
 关键设计点：
-- 使用 "$TARGET" "$@" 而非 exec，确保父 Shell 的别名、函数和自定义变量完整继承
-- exit $? 正确传递原命令的退出码
+- Android 9 及以下：直接 exec 执行
+- Android 10+：通过 file 命令检测二进制位数，选择 linker 或 linker64 执行
+- 使用 exec 替换当前进程，确保信号传递正确
 
 
 ## 📦 安装与要求
@@ -183,7 +203,6 @@ su
 
 ## 📝 注意事项
 
-- SELinux 规则在 Android 10+ 自动生效，无需干预
 - 权限修复仅针对必要目录，不影响 Termux 自身
 - 日志文件位于 /data/local/tmp/termux_path.log，超过 1MB 自动轮转
 - 关键命令（su、mount 等）即使在白名单中也不会被覆盖
@@ -210,7 +229,7 @@ su
 git clone https://github.com/Klein-ops/termux_path.git
 cd termux_path
 chmod 755 service.sh action.sh customize.sh uninstall.sh
-zip -r termux_path_v2.1.0.zip ./* -x ".git/*" -x "*.md" -x ".gitignore"
+zip -r termux_path_v2.2.0.zip ./* -x ".git/*" -x "*.md" -x ".gitignore"
 
 
 ## 📄 许可证
