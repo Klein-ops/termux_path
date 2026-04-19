@@ -25,7 +25,7 @@ TERMUX_BIN_DIR="/data/data/com.termux/files/usr/bin"
 MODULE_BIN_DIR="$MODDIR/system/xbin"
 MODULE_BIN_DIR_OVERRIDE="$MODDIR/system/bin"
 LOG_FILE="/data/local/tmp/termux_path.log"
-WRAPPER_VERSION="3.0"
+WRAPPER_VERSION="4.0"
 CRITICAL_CMDS="su mount umount reboot shutdown magisk magiskpolicy resetprop"
 BLACKLIST_FILE="$MODDIR/blacklist"
 WHITELIST_FILE="$MODDIR/whitelist"
@@ -130,7 +130,7 @@ is_termux_cmd_valid() {
 generate_main_wrapper() {
     cat << 'EOF'
 #!/system/bin/sh
-# termux_path Wrapper v3.0
+# termux_path Wrapper v4.0
 
 CMD=$(basename "$0")
 PREFIX="/data/data/com.termux/files/usr"
@@ -162,19 +162,48 @@ fi
 if [ "$sdk_version" -ge 29 ]; then
     file_output=$(file "$TARGET" 2>/dev/null)
     case "$file_output" in
-        *"64-bit"*)
-            linker="linker64"
-            ;;
-        *"32-bit"*)
-            linker="linker"
+        *"ELF"*)
+            case "$file_output" in
+                *"64-bit"*)
+                    linker="linker64"
+                    ;;
+                *"32-bit"*)
+                    linker="linker"
+                    ;;
+                *)
+                    "$TARGET" "$@"
+                    exit $?
+                    ;;
+            esac
+            "$linker" "$TARGET" "$@"
+            exit $?
             ;;
         *)
-            exec "$TARGET" "$@"
+            if [ -x "$PREFIX/bin/bash" ]; then
+                bash_file_output=$(file "$PREFIX/bin/bash" 2>/dev/null)
+                case "$bash_file_output" in
+                    *"64-bit"*)
+                        linker="linker64"
+                        ;;
+                    *"32-bit"*)
+                        linker="linker"
+                        ;;
+                    *)
+                        "$TARGET" "$@"
+                        exit $?
+                        ;;
+                esac
+                "$linker" "$PREFIX/bin/bash" "$TARGET" "$@"
+                exit $?
+            else
+                "$TARGET" "$@"
+                exit $?
+            fi
             ;;
     esac
-    exec "$linker" "$TARGET" "$@"
 else
-    exec "$TARGET" "$@"
+    "$TARGET" "$@"
+    exit $?
 fi
 EOF
 }
