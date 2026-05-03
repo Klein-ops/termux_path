@@ -3,7 +3,9 @@
 MODDIR="$(readlink -f "${0%/*}")"
 [ -z "$MODDIR" ] && MODDIR="."
 
-exec 2>>"/data/local/tmp/termux_path.log"
+log_cmd() {
+    "$@" 2>>"$LOG_FILE"
+}
 
 # === 常量 ===
 TERMUX_BIN_DIR="/data/data/com.termux/files/usr/bin"
@@ -19,17 +21,17 @@ WRAPPER_MAIN_NAME="wrapper_main.sh"
 
 # === 初始化环境 ===
 init_env() {
-    mkdir -p "$MODULE_BIN_DIR"
-    chmod 755 "$MODDIR" "$MODDIR/system" "$MODULE_BIN_DIR"
-    chown -R root:root "$MODDIR"
+    log_cmd mkdir -p "$MODULE_BIN_DIR"
+    log_cmd chmod 755 "$MODDIR" "$MODDIR/system" "$MODULE_BIN_DIR"
+    log_cmd chown -R root:root "$MODDIR"
 
     if [ -d "/data/data/com.termux" ]; then
-        restorecon -R /data/data/com.termux
-        chmod 755 /data/data/com.termux
-        chmod 755 /data/data/com.termux/files
-        chmod -R 755 /data/data/com.termux/files/usr
-        mkdir -p /data/data/com.termux/files/usr/tmp
-        chmod 1777 /data/data/com.termux/files/usr/tmp
+        log_cmd restorecon -R /data/data/com.termux
+        log_cmd chmod 755 /data/data/com.termux
+        log_cmd chmod 755 /data/data/com.termux/files
+        log_cmd chmod -R 755 /data/data/com.termux/files/usr
+        log_cmd mkdir -p /data/data/com.termux/files/usr/tmp
+        log_cmd chmod 1777 /data/data/com.termux/files/usr/tmp
         log "Termux 权限已精细修复"
     fi
 }
@@ -43,7 +45,7 @@ log() {
         fi
     fi
     echo "$(date '+%m-%d %H:%M:%S') - $*" >> "$LOG_FILE"
-    chmod 644 "$LOG_FILE"
+    log_cmd chmod 644 "$LOG_FILE"
 }
 
 # === 获取系统 PATH ===
@@ -205,13 +207,13 @@ ensure_main_wrapper() {
     for dir in "$MODULE_BIN_DIR" "$MODULE_BIN_DIR_OVERRIDE"; do
         if [ "$dir" = "$MODULE_BIN_DIR_OVERRIDE" ]; then
             [ -f "$whitelist_file" ] && [ -s "$whitelist_file" ] || continue
-            mkdir -p "$dir"
+            log_cmd mkdir -p "$dir"
         fi
         if [ ! -f "$dir/$WRAPPER_MAIN_NAME" ] || ! grep -q "# termux_path Wrapper v$WRAPPER_VERSION" "$dir/$WRAPPER_MAIN_NAME" 2>/dev/null; then
             generate_main_wrapper > "$dir/$WRAPPER_MAIN_NAME"
-            chmod 755 "$dir/$WRAPPER_MAIN_NAME"
-            chown root:root "$dir/$WRAPPER_MAIN_NAME"
-            chcon u:object_r:system_file:s0 "$dir/$WRAPPER_MAIN_NAME"
+            log_cmd chmod 755 "$dir/$WRAPPER_MAIN_NAME"
+            log_cmd chown root:root "$dir/$WRAPPER_MAIN_NAME"
+            log_cmd chcon u:object_r:system_file:s0 "$dir/$WRAPPER_MAIN_NAME"
             log "$(basename "$dir") 主脚本已更新到 v$WRAPPER_VERSION"
         fi
     done
@@ -358,6 +360,12 @@ cleanup_invalid_wrappers() {
 # === 主同步流程 ===
 sync_all() {
     log "========== 开始同步 =========="
+
+    if [ -d "/data/data/com.termux" ]; then
+        log "Termux 应用已安装"
+    else
+        log "Termux 应用未安装，无法继续"
+    fi
 
     echo "正在加载白名单..." >&2
     whitelist="$(load_list "$WHITELIST_FILE")"
