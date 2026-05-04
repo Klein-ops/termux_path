@@ -9,7 +9,9 @@ log_cmd() {
 
 # === 常量 ===
 TERMUX_BIN_DIR="/data/data/com.termux/files/usr/bin"
-MODULE_BIN_DIR="$MODDIR/system/xbin"
+# 默认挂载到 vendor/bin 目录，更安全且兼容现代安卓
+MODULE_BIN_DIR="$MODDIR/system/vendor/bin"
+# 白名单挂载到 bin 目录，用于强制覆盖系统命令
 MODULE_BIN_DIR_OVERRIDE="$MODDIR/system/bin"
 LOG_FILE="/data/local/tmp/termux_path.log"
 WRAPPER_VERSION="4.0"
