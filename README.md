@@ -37,7 +37,7 @@
 | 精细化权限修复 | 仅修改必要目录，不对 Termux 数据目录过度干预 |
 | 用户黑名单 | 自定义屏蔽不希望暴露的命令 |
 | 全局错误日志 | 所有系统命令的 stderr 自动记录到日志文件 |
-| POSIX 兼容 | 纯 POSIX sh 语法，所有设备通用 |
+| 现代安卓目录适配 | 挂载到 /system/vendor/bin，兼容 Android 10+ |
 
 
 ## 🏗️ 技术架构
@@ -46,23 +46,29 @@
 
 模块采用「软链接 + 统一主脚本 + 双目录」架构：
 
-/system/bin/               # 白名单命令目录（优先于系统 PATH）
-├── wrapper_main.sh         # 主脚本副本
-├── awk -> wrapper_main.sh  # 强制覆盖系统的 awk
-└── grep -> wrapper_main.sh # 强制覆盖系统的 grep
+/system/bin/                   # 白名单命令目录（优先于系统 PATH）
+├── wrapper_main.sh             # 主脚本副本
+├── awk -> wrapper_main.sh      # 强制覆盖系统的 awk
+└── grep -> wrapper_main.sh     # 强制覆盖系统的 grep
 
-/system/xbin/               # 普通命令目录（跳过系统命令）
-├── wrapper_main.sh         # 统一主脚本
+/system/vendor/bin/             # 普通命令目录（跳过系统命令，兼容现代安卓）
+├── wrapper_main.sh             # 统一主脚本
 ├── python -> wrapper_main.sh
 ├── ffmpeg -> wrapper_main.sh
 └── git -> wrapper_main.sh
 
 当用户执行命令时：
-1. 终端按系统 PATH 顺序查找：/system/bin 优先于 /system/xbin
+1. 终端按系统 PATH 顺序查找：/system/bin 优先于 /system/vendor/bin
 2. 白名单命令在 /system/bin 中被找到，优先执行
-3. 普通命令在 /system/xbin 中被找到（前提是不与系统命令冲突）
+3. 普通命令在 /system/vendor/bin 中被找到（前提是不与系统命令冲突）
 4. 软链接指向同目录的 wrapper_main.sh
 5. 主脚本解析命令名，设置 Termux 环境，智能选择执行方式
+
+### 为什么使用 /system/vendor/bin
+
+现代安卓系统（尤其是 Android 10+）不再保证 /system/xbin 目录存在，
+而 /system/vendor/bin 作为供应商分区的一部分，始终存在且位于系统 PATH 中。
+选择该目录可确保模块在所有现代设备上稳定工作。
 
 ### 核心设计原则
 
@@ -77,7 +83,7 @@
 
 #### 阶段一：环境初始化
 
-1. 创建 /system/xbin 目录并设置权限（bin 目录按需创建）
+1. 创建 /system/vendor/bin 目录并设置权限（bin 目录按需创建）
 2. 使用 log_cmd 函数执行所有系统命令，stderr 自动记录到日志
 3. 精细化修复 Termux 必要目录权限（755/1777）
 
@@ -86,7 +92,7 @@
 1. 通过 load_list 加载白名单和黑名单，返回格式如 /cmd1//cmd2/
 2. 调用 build_system_cmd_cache 扫描系统 PATH，返回同格式的命令缓存
 3. 调用 build_foreign_cmd_cache 扫描其他 Magisk 模块的命令，构建外部命令缓存
-4. 确保主脚本 wrapper_main.sh 在 xbin 目录存在，若白名单非空则在 bin 目录也创建副本
+4. 确保主脚本 wrapper_main.sh 在 vendor/bin 目录存在，若白名单非空则在 bin 目录也创建副本
 
 #### 阶段三：命令扫描与链接创建
 
@@ -97,13 +103,13 @@
 3. 系统命令冲突 → 跳过
 4. 其他模块命令冲突 → 跳过
 5. 关键命令黑名单 → 跳过
-6. 通过所有检查 → 创建到 /system/xbin
+6. 通过所有检查 → 创建到 /system/vendor/bin
 
 #### 阶段四：失效清理
 
 1. 白名单为空时，直接删除整个 /system/bin 目录
 2. 白名单非空时，遍历 /system/bin 清理不在白名单中的 wrapper
-3. 遍历 /system/xbin 清理黑名单中的 wrapper、其他模块已接管的命令、以及 Termux 已卸载的命令
+3. 遍历 /system/vendor/bin 清理黑名单中的 wrapper、其他模块已接管的命令、以及 Termux 已卸载的命令
 
 ### 多模块共存机制详解
 
@@ -131,7 +137,6 @@ CMD=$(basename "$0")
 PREFIX="/data/data/com.termux/files/usr"
 TARGET="$PREFIX/bin/$CMD"
 
-# 验证目标文件存在且可执行
 if [ ! -f "$TARGET" ]; then
     echo "错误: Termux 中未安装命令 '$CMD'" >&2
     exit 127
@@ -142,24 +147,23 @@ if [ ! -x "$TARGET" ]; then
     exit 126
 fi
 
-# 设置 Termux 运行时环境
 export HOME="$PREFIX/home"
 export TMPDIR="$PREFIX/tmp"
 export PREFIX="$PREFIX"
 [ -n "$LD_LIBRARY_PATH" ] && export LD_LIBRARY_PATH="$PREFIX/lib:$LD_LIBRARY_PATH" || export LD_LIBRARY_PATH="$PREFIX/lib"
 export PATH="$PREFIX/bin:$PATH"
 
-# 获取 SDK 版本
+[ ! -d "$PREFIX/tmp" ] && mkdir -p "$PREFIX/tmp" 2>/dev/null
+
 sdk_version=$(getprop ro.build.version.sdk 2>/dev/null)
 [ -z "$sdk_version" ] && sdk_version=0
 
-# Android 10+ 用 dd 读取 ELF 头判断位数
 if [ "$sdk_version" -ge 29 ]; then
     elf_class=$(dd if="$TARGET" bs=1 skip=4 count=1 2>/dev/null | od -A n -t d1 | tr -d ' ')
     case "$elf_class" in
-        2) linker="linker64" ;;    # 64 位二进制
-        1) linker="linker" ;;      # 32 位二进制
-        *)  # 非 ELF 文件（脚本等）
+        2) linker="linker64" ;;
+        1) linker="linker" ;;
+        *)
             if [ -x "$PREFIX/bin/bash" ]; then
                 bash_elf_class=$(dd if="$PREFIX/bin/bash" bs=1 skip=4 count=1 2>/dev/null | od -A n -t d1 | tr -d ' ')
                 case "$bash_elf_class" in
@@ -253,6 +257,7 @@ su
 - 日志文件位于 /data/local/tmp/termux_path.log，超过 1MB 自动轮转
 - 关键命令（su、mount 等）即使在白名单中也不会被覆盖
 - 仅在使用系统 PATH 的终端中有效，不保证在所有终端应用中可用
+- 从旧版本升级后，如有旧 xbin 目录残留请手动删除
 
 
 ## 🔧 故障排查
@@ -272,7 +277,7 @@ su
 git clone https://github.com/Klein-ops/termux_path.git
 cd termux_path
 chmod 755 service.sh action.sh customize.sh uninstall.sh
-zip -r termux_path_v2.3.1.zip ./* -x ".git/*" -x "*.md" -x ".gitignore"
+zip -r termux_path_v2.4.0.zip ./* -x ".git/*" -x "*.md" -x ".gitignore"
 
 
 ## 📄 许可证
