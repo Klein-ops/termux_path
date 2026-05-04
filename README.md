@@ -2,6 +2,8 @@
 
 将 Termux 命令无缝桥接到 Android 系统 PATH 的 Magisk 模块。
 
+**前提条件：必须先在手机中安装 Termux 应用，并在 Termux 内使用 pkg install 安装所需程序。本模块仅负责桥接，不包含任何命令。**
+
 安装后，你可以在任何使用系统 PATH 的终端中直接运行 Termux 安装的程序——python、ffmpeg、youtube-dl、vim、git……就像它们原本就是系统命令一样。典型场景如 adb shell、Terminal Emulator 等，只要终端遵循系统 PATH 环境变量即可。
 
 
@@ -159,7 +161,6 @@ if [ "$sdk_version" -ge 29 ]; then
         1) linker="linker" ;;      # 32 位二进制
         *)  # 非 ELF 文件（脚本等）
             if [ -x "$PREFIX/bin/bash" ]; then
-                # 读取 bash 的 ELF 头判断位数，用对应 linker 执行
                 bash_elf_class=$(dd if="$PREFIX/bin/bash" bs=1 skip=4 count=1 2>/dev/null | od -A n -t d1 | tr -d ' ')
                 case "$bash_elf_class" in
                     2) linker="linker64" ;;
@@ -193,6 +194,11 @@ fi
 
 3. 错误日志
    所有系统命令的 stderr 通过 log_cmd 函数自动追加到 /data/local/tmp/termux_path.log，排查问题只需这一份日志
+
+
+## ⚠️ 使用前提
+
+**本模块不包含任何命令。** 你必须先在手机上安装 Termux 应用，并在 Termux 内使用 pkg install 安装你需要的程序（如 pkg install python），本模块才能将这些命令桥接到系统 PATH。
 
 
 ## 📦 安装与要求
@@ -252,7 +258,7 @@ su
 ## 🔧 故障排查
 
 常见问题：
-- command not found：手动扫描或检查 Termux 是否安装；确认当前终端使用系统 PATH
+- command not found：确认 Termux 中已用 pkg install 安装了对应程序，然后手动执行一次扫描
 - Permission denied：重启手机或手动执行 restorecon
 - 白名单未生效：检查文件路径和内容，确认已触发扫描
 - 与其他模块冲突：本模块会自动避让，无需手动干预
