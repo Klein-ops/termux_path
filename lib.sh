@@ -9,9 +9,7 @@ log_cmd() {
 
 # === 常量 ===
 TERMUX_BIN_DIR="/data/data/com.termux/files/usr/bin"
-# 默认挂载到 vendor/bin 目录，更安全且兼容现代安卓
 MODULE_BIN_DIR="$MODDIR/system/vendor/bin"
-# 白名单挂载到 bin 目录，用于强制覆盖系统命令
 MODULE_BIN_DIR_OVERRIDE="$MODDIR/system/bin"
 LOG_FILE="/data/local/tmp/termux_path.log"
 WRAPPER_VERSION="4.0"
@@ -453,14 +451,67 @@ run_scan() {
 
     if [ "$created" -gt 0 ] || [ "$cleaned" -gt 0 ]; then
         echo ""
-        echo "检测到 wrapper 变更，是否立即重启生效？"
-        printf "5 秒后自动放弃，输入 Y 重启: "
-        read -t 5 answer
-        if [ "$answer" = "Y" ] || [ "$answer" = "y" ]; then
-            echo "正在重启..."
-            reboot
+        echo "检测到 wrapper 变更。"
+
+        DEVICES=""
+        for dev in /dev/input/event*; do
+            if /system/bin/getevent -p "$dev" 2>/dev/null | grep -qE "0072|0073"; then
+                DEVICES="$DEVICES $dev"
+            fi
+        done
+
+        if [ -n "$DEVICES" ]; then
+            echo "5秒内按【音量加】重启，按【音量减】退出..."
+
+            RESULT_FILE="/data/local/tmp/termux_path_key_result"
+            DETECT_FILE="/data/local/tmp/termux_path_key_detected"
+            rm -f "$RESULT_FILE" "$DETECT_FILE"
+
+            PIDS=""
+            for dev in $DEVICES; do
+                [ ! -e "$dev" ] && continue
+                (
+                    while [ -e "$dev" ] && [ ! -f "$DETECT_FILE" ]; do
+                        event=$(/system/bin/getevent -c 1 "$dev" 2>/dev/null)
+                        if [ -z "$event" ]; then
+                            sleep 0.2
+                            continue
+                        fi
+                        if echo "$event" | grep -qE "0073.*00000001"; then
+                            echo "volume_up" > "$RESULT_FILE"
+                            touch "$DETECT_FILE"
+                            break
+                        elif echo "$event" | grep -qE "0072.*00000001"; then
+                            echo "volume_down" > "$RESULT_FILE"
+                            touch "$DETECT_FILE"
+                            break
+                        fi
+                    done
+                ) &
+                PIDS="$PIDS $!"
+            done
+
+            sleep 5
+
+            for pid in $PIDS; do
+                kill "$pid" 2>/dev/null
+            done
+            rm -f "$DETECT_FILE"
+
+            key_pressed=""
+            if [ -f "$RESULT_FILE" ]; then
+                key_pressed=$(cat "$RESULT_FILE")
+                rm -f "$RESULT_FILE"
+            fi
+
+            if [ "$key_pressed" = "volume_up" ]; then
+                echo ">>> 音量加按下，正在重启..."
+                reboot
+            else
+                echo "已取消或超时，变更将在下次开机时生效。"
+            fi
         else
-            echo "已取消，变更将在下次开机时生效。"
+            echo "未检测到音量键设备，变更将在下次开机时生效。"
         fi
     fi
 }
