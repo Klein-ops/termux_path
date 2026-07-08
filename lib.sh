@@ -3,37 +3,26 @@
 MODDIR="$(readlink -f "${0%/*}")"
 [ -z "$MODDIR" ] && MODDIR="."
 
-log_cmd() {
-    "$@" 2>>"$LOG_FILE"
-}
-
 # === 常量 ===
 TERMUX_BIN_DIR="/data/data/com.termux/files/usr/bin"
 MODULE_BIN_DIR="$MODDIR/system/vendor/bin"
 MODULE_BIN_DIR_OVERRIDE="$MODDIR/system/bin"
 LOG_FILE="/data/local/tmp/termux_path.log"
-WRAPPER_VERSION="4.0"
+WRAPPER_VERSION="4.1"
 CRITICAL_CMDS="su mount umount reboot shutdown magisk magiskpolicy resetprop"
 BLACKLIST_FILE="$MODDIR/blacklist"
 WHITELIST_FILE="$MODDIR/whitelist"
-
 WRAPPER_MAIN_NAME="wrapper_main.sh"
 
-# === 初始化环境 ===
-init_env() {
-    log_cmd mkdir -p "$MODULE_BIN_DIR"
-    log_cmd chmod 755 "$MODDIR" "$MODDIR/system" "$MODULE_BIN_DIR"
-    log_cmd chown -R root:root "$MODDIR"
-
-    if [ -d "/data/data/com.termux" ]; then
-        log_cmd restorecon -R /data/data/com.termux
-        log_cmd chmod 755 /data/data/com.termux
-        log_cmd chmod 755 /data/data/com.termux/files
-        log_cmd chmod -R 755 /data/data/com.termux/files/usr
-        log_cmd mkdir -p /data/data/com.termux/files/usr/tmp
-        log_cmd chmod 1777 /data/data/com.termux/files/usr/tmp
-        log "Termux 权限已精细修复"
+# === 安全执行命令（存在检查）===
+safe_run() {
+    local cmd="$1"
+    shift
+    if command -v "$cmd" >/dev/null 2>&1; then
+        "$cmd" "$@" 2>/dev/null
+        return $?
     fi
+    return 0
 }
 
 # === 日志（带轮转，上限 1MB）===
@@ -45,7 +34,28 @@ log() {
         fi
     fi
     echo "$(date '+%m-%d %H:%M:%S') - $*" >> "$LOG_FILE"
-    log_cmd chmod 644 "$LOG_FILE"
+    chmod 644 "$LOG_FILE" 2>/dev/null
+}
+
+log_cmd() {
+    "$@" 2>>"$LOG_FILE"
+}
+
+# === 初始化环境 ===
+init_env() {
+    log_cmd mkdir -p "$MODULE_BIN_DIR"
+    log_cmd chmod 755 "$MODDIR" "$MODDIR/system" "$MODULE_BIN_DIR"
+    log_cmd chown -R root:root "$MODDIR"
+
+    if [ -d "/data/data/com.termux" ]; then
+        safe_run restorecon -R /data/data/com.termux
+        log_cmd chmod 755 /data/data/com.termux
+        log_cmd chmod 755 /data/data/com.termux/files
+        log_cmd chmod -R 755 /data/data/com.termux/files/usr
+        log_cmd mkdir -p /data/data/com.termux/files/usr/tmp
+        log_cmd chmod 1777 /data/data/com.termux/files/usr/tmp
+        log "Termux 权限已精细修复"
+    fi
 }
 
 # === 获取系统 PATH ===
@@ -58,12 +68,15 @@ get_system_path() {
     fi
 }
 
-# === 加载列表文件 ===
+# === 加载列表文件（修复：自动 trim 空白字符）===
 load_list() {
     file="$1"
     result=""
     if [ -f "$file" ]; then
         while IFS= read -r line || [ -n "$line" ]; do
+            # trim 前导和尾部空白
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
             [ -z "$line" ] && continue
             echo "$line" | grep -q "^#" && continue
             result="${result}/$line/"
@@ -82,14 +95,17 @@ in_list() {
     esac
 }
 
-# === 扫描目录列表，构建命令缓存 ===
+# === 扫描目录列表，构建命令缓存（修复：glob 替代 ls；参数替换替代 basename，避免大量 fork）===
 scan_dirs_to_cache() {
     desc="$1"
     shift
     result=""
     for dir in "$@"; do
         if [ -d "$dir" ]; then
-            for cmd in $(ls "$dir" 2>/dev/null); do
+            for cmd_path in "$dir"/*; do
+                [ -e "$cmd_path" ] || continue
+                # 使用参数替换替代 basename（外部命令），避免每次 fork+exec
+                cmd="${cmd_path##*/}"
                 result="${result}/$cmd/"
             done
         fi
@@ -140,11 +156,21 @@ is_termux_cmd_valid() {
     [ -f "$target" ] || [ -L "$target" ] && [ -x "$target" ]
 }
 
-# === 生成主脚本内容 ===
+# === 检测 linker 位置（修复：搜索 APEX / system / 根目录 / PATH）===
+detect_linker_bin() {
+    local bitness="$1"
+    local name="linker${bitness}"
+    for l in "/apex/com.android.runtime/bin/$name" "/system/bin/$name" "/$name"; do
+        [ -x "$l" ] && { echo "$l"; return 0; }
+    done
+    command -v "$name" 2>/dev/null
+}
+
+# === 生成主脚本内容（修复：使用 detect_linker，消除 bash 递归）===
 generate_main_wrapper() {
     cat << 'EOF'
 #!/system/bin/sh
-# termux_path Wrapper v4.0
+# termux_path Wrapper v4.1
 
 CMD=$(basename "$0")
 PREFIX="/data/data/com.termux/files/usr"
@@ -171,28 +197,35 @@ export PATH="$PREFIX/bin:$PATH"
 sdk_version=$(getprop ro.build.version.sdk 2>/dev/null)
 [ -z "$sdk_version" ] && sdk_version=0
 
+# 检测 linker 位置（APEX / system / 根目录 / PATH）
+detect_linker() {
+    local bitness="$1"
+    local name="linker${bitness}"
+    for l in "/apex/com.android.runtime/bin/$name" "/system/bin/$name" "/$name"; do
+        [ -x "$l" ] && { echo "$l"; return 0; }
+    done
+    command -v "$name" 2>/dev/null
+}
+
 if [ "$sdk_version" -ge 29 ]; then
     elf_class=$(dd if="$TARGET" bs=1 skip=4 count=1 2>/dev/null | od -A n -t d1 | tr -d ' ')
     case "$elf_class" in
-        2) linker="linker64" ;;
-        1) linker="linker" ;;
+        2)
+            linker="$(detect_linker 64)"
+            [ -n "$linker" ] && { "$linker" "$TARGET" "$@"; exit $?; }
+            ;;
+        1)
+            linker="$(detect_linker '')"
+            [ -n "$linker" ] && { "$linker" "$TARGET" "$@"; exit $?; }
+            ;;
         *)
-            if [ -x "$PREFIX/bin/bash" ]; then
-                bash_elf_class=$(dd if="$PREFIX/bin/bash" bs=1 skip=4 count=1 2>/dev/null | od -A n -t d1 | tr -d ' ')
-                case "$bash_elf_class" in
-                    2) linker="linker64" ;;
-                    1) linker="linker" ;;
-                    *) "$TARGET" "$@"; exit $? ;;
-                esac
-                "$linker" "$PREFIX/bin/bash" "$TARGET" "$@"
-                exit $?
-            else
-                "$TARGET" "$@"
-                exit $?
-            fi
+            # 非标准 ELF class（如脚本），直接执行
+            "$TARGET" "$@"
+            exit $?
             ;;
     esac
-    "$linker" "$TARGET" "$@"
+    # linker 未找到时 fallback 到直接执行
+    "$TARGET" "$@"
     exit $?
 else
     "$TARGET" "$@"
@@ -219,11 +252,13 @@ ensure_main_wrapper() {
     done
 }
 
-# === 创建 wrapper 软链接 ===
+# === 创建 wrapper 软链接（修复：确保目标目录存在）===
 create_wrapper() {
     cmd="$1"
     target_dir="$2"
     target="$target_dir/$cmd"
+
+    mkdir -p "$target_dir"
 
     if [ -L "$target" ]; then
         link_target="$(readlink "$target")"
@@ -253,7 +288,7 @@ scan_and_create() {
         [ -f "$f" ] || [ -L "$f" ] || continue
         [ -x "$f" ] || continue
 
-        cmd="$(basename "$f")"
+        cmd="${f##*/}"
         total=$((total + 1))
 
         if in_list "$cmd" "$whitelist"; then
@@ -315,10 +350,11 @@ cleanup_invalid_wrappers() {
     for target_dir in "$MODULE_BIN_DIR_OVERRIDE" "$MODULE_BIN_DIR"; do
         for wrapper in "$target_dir"/*; do
             [ -f "$wrapper" ] || [ -L "$wrapper" ] || continue
-            [ "$(basename "$wrapper")" = "$WRAPPER_MAIN_NAME" ] && continue
+            wrapper_name="${wrapper##*/}"
+            [ "$wrapper_name" = "$WRAPPER_MAIN_NAME" ] && continue
 
             is_our_wrapper "$wrapper" || continue
-            cmd="$(basename "$wrapper")"
+            cmd="$wrapper_name"
 
             if [ "$target_dir" = "$MODULE_BIN_DIR_OVERRIDE" ]; then
                 if [ ! -s "$WHITELIST_FILE" ] || ! in_list "$cmd" "$whitelist"; then
@@ -413,9 +449,9 @@ run_service() {
     log "模块完成"
 }
 
-# === 手动扫描入口 ===
+# === 手动扫描入口（修复：按键检测先锁后写）===
 run_scan() {
-    echo "termux_path - 手动扫描"
+    echo "termux_path - 手动扫描 (v$WRAPPER_VERSION)"
     echo "===================="
 
     init_env
@@ -478,12 +514,17 @@ run_scan() {
                             continue
                         fi
                         if echo "$event" | grep -qE "0073.*00000001"; then
-                            echo "volume_up" > "$RESULT_FILE"
-                            touch "$DETECT_FILE"
+                            # 修复：先创建锁文件再写入结果，消除竞态条件
+                            if [ ! -f "$DETECT_FILE" ]; then
+                                touch "$DETECT_FILE"
+                                echo "volume_up" > "$RESULT_FILE"
+                            fi
                             break
                         elif echo "$event" | grep -qE "0072.*00000001"; then
-                            echo "volume_down" > "$RESULT_FILE"
-                            touch "$DETECT_FILE"
+                            if [ ! -f "$DETECT_FILE" ]; then
+                                touch "$DETECT_FILE"
+                                echo "volume_down" > "$RESULT_FILE"
+                            fi
                             break
                         fi
                     done
